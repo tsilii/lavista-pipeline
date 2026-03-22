@@ -305,25 +305,23 @@ elif page == "Expenses":
         st.warning("No expenses found. Run `python seed_expenses.py` first.")
         st.stop()
 
-    # Latest month available
     latest_month   = expenses["month"].max()
     month_expenses = expenses[expenses["month"] == latest_month]
 
-    total_expenses   = month_expenses["amount"].sum()
-    top_category     = month_expenses.groupby("category")["amount"].sum().idxmax()
-    top_cat_amount   = month_expenses.groupby("category")["amount"].sum().max()
-    num_categories   = month_expenses["category"].nunique()
+    total_expenses  = month_expenses["amount"].sum()
+    top_category    = month_expenses.groupby("category")["amount"].sum().idxmax()
+    top_cat_amount  = month_expenses.groupby("category")["amount"].sum().max()
+    num_categories  = month_expenses["category"].nunique()
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Monthly Expenses",   f"€{total_expenses:,.2f}")
-    k2.metric("Biggest Category",   top_category)
-    k3.metric("Category Amount",    f"€{top_cat_amount:,.2f}")
-    k4.metric("Categories",         f"{num_categories}")
+    k1.metric("Monthly Expenses",  f"€{total_expenses:,.2f}")
+    k2.metric("Biggest Category",  top_category)
+    k3.metric("Category Amount",   f"€{top_cat_amount:,.2f}")
+    k4.metric("Categories",        f"{num_categories}")
 
     st.divider()
 
     col_left, col_right = st.columns(2)
-
     with col_left:
         st.subheader("Expenses by Category")
         by_cat = (
@@ -332,7 +330,6 @@ elif page == "Expenses":
         )
         by_cat.columns = ["Category", "Amount (€)"]
         st.bar_chart(by_cat.set_index("Category"))
-
     with col_right:
         st.subheader("Expense Breakdown")
         display_exp = month_expenses[["category", "description", "amount"]].copy()
@@ -342,18 +339,15 @@ elif page == "Expenses":
 
     st.divider()
 
-    # Expenses vs Revenue
     st.subheader("Expenses vs Revenue")
     txn, _, _ = load_sales_data()
     if txn is not None and not txn.empty:
         total_revenue   = float(txn["total"].sum())
         expenses_ratio  = (float(total_expenses) / total_revenue * 100) if total_revenue > 0 else 0
-
         col_a, col_b, col_c = st.columns(3)
         col_a.metric("Total Revenue (all time)", f"€{total_revenue:,.2f}")
         col_b.metric("Monthly Expenses",         f"€{total_expenses:,.2f}")
         col_c.metric("Expenses / Revenue",        f"{expenses_ratio:.1f}%")
-
         if expenses_ratio > 30:
             st.warning("Expenses are above 30% of revenue — review costs.")
         else:
@@ -361,14 +355,11 @@ elif page == "Expenses":
     else:
         st.info("No sales data available for comparison.")
 
-    # Month selector if multiple months exist
     all_months = sorted(expenses["month"].unique(), reverse=True)
     if len(all_months) > 1:
         st.divider()
         st.subheader("Historical Expenses")
-        monthly_totals = (
-            expenses.groupby("month")["amount"].sum().reset_index()
-        )
+        monthly_totals = expenses.groupby("month")["amount"].sum().reset_index()
         monthly_totals.columns = ["Month", "Total Expenses (€)"]
         st.bar_chart(monthly_totals.set_index("Month"))
 
@@ -383,9 +374,145 @@ elif page == "Inventory":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE: P&L (coming soon)
+# PAGE: P&L
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "P&L":
     st.title("Lavista Restaurant — Profit & Loss")
-    st.info("P&L page coming soon. Complete Expenses and Inventory pages first.")
+
+    COGS_RATE = 0.30  # industry standard: 30% of revenue goes to food cost
+
+    # Load all data
+    txn, _, _  = load_sales_data()
+    employees  = load_payroll_data()
+    expenses   = load_expenses_data()
+
+    if txn is None or txn.empty:
+        st.warning("No sales data found.")
+        st.stop()
+
+    if employees is None or employees.empty:
+        st.warning("No payroll data found. Run `python seed_employees.py` first.")
+        st.stop()
+
+    if expenses is None or expenses.empty:
+        st.warning("No expenses data found. Run `python seed_expenses.py` first.")
+        st.stop()
+
+    # ── Calculations ──────────────────────────────────────────────────────────
+
+    gross_revenue      = float(txn["total"].sum())
+    cogs               = gross_revenue * COGS_RATE
+    gross_profit       = gross_revenue - cogs
+    gross_margin       = (gross_profit / gross_revenue * 100) if gross_revenue > 0 else 0
+
+    total_payroll      = float(employees["monthly_salary"].sum())
+
+    latest_month       = expenses["month"].max()
+    month_expenses     = expenses[expenses["month"] == latest_month]
+    total_expenses_amt = float(month_expenses["amount"].sum())
+
+    total_opex         = total_payroll + total_expenses_amt
+    net_profit         = gross_profit - total_opex
+    net_margin         = (net_profit / gross_revenue * 100) if gross_revenue > 0 else 0
+
+    # ── KPI row ───────────────────────────────────────────────────────────────
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Gross Revenue",  f"€{gross_revenue:,.2f}")
+    k2.metric("Gross Profit",   f"€{gross_profit:,.2f}")
+    k3.metric("Net Profit",     f"€{net_profit:,.2f}",
+              delta=f"{net_margin:.1f}% margin",
+              delta_color="normal" if net_profit >= 0 else "inverse")
+    k4.metric("Gross Margin",   f"{gross_margin:.1f}%")
+
+    st.divider()
+
+    # ── P&L Statement ─────────────────────────────────────────────────────────
+
+    col_left, col_right = st.columns([2, 1])
+
+    with col_left:
+        st.subheader("P&L Statement")
+
+        def pl_row(label, amount, bold=False, indent=False, positive_is_good=True):
+            prefix   = "　　" if indent else ""
+            color    = "green" if (amount >= 0 and positive_is_good) else "red"
+            sign     = "+" if amount >= 0 else ""
+            if bold:
+                st.markdown(
+                    f"**{prefix}{label}** &nbsp;&nbsp;&nbsp; "
+                    f"**:{color}[{sign}€{abs(amount):,.2f}]**"
+                )
+            else:
+                st.markdown(
+                    f"{prefix}{label} &nbsp;&nbsp;&nbsp; "
+                    f":{color}[{sign}€{abs(amount):,.2f}]"
+                )
+
+        # Revenue
+        st.markdown("#### Revenue")
+        pl_row("Total Sales", gross_revenue, bold=True)
+        st.markdown("---")
+
+        # COGS
+        st.markdown("#### Cost of Goods Sold")
+        pl_row("Food & Beverage Cost (est. 30%)", -cogs, indent=True, positive_is_good=False)
+        st.caption("⚠️ COGS estimated at industry standard 30% — not tracked directly")
+        pl_row("Gross Profit", gross_profit, bold=True)
+        st.markdown(f"*Gross Margin: {gross_margin:.1f}%*")
+        st.markdown("---")
+
+        # Operating expenses
+        st.markdown("#### Operating Expenses")
+        pl_row("Payroll", -total_payroll, indent=True, positive_is_good=False)
+
+        # Break down expenses by category
+        by_cat = month_expenses.groupby("category")["amount"].sum()
+        for cat, amt in by_cat.sort_values(ascending=False).items():
+            pl_row(cat, -amt, indent=True, positive_is_good=False)
+
+        pl_row("Total Operating Expenses", -total_opex, bold=True, positive_is_good=False)
+        st.markdown("---")
+
+        # Net profit
+        pl_row("Net Profit / Loss", net_profit, bold=True)
+        st.markdown(f"*Net Margin: {net_margin:.1f}%*")
+
+    with col_right:
+        st.subheader("Cost Breakdown")
+
+        breakdown = pd.DataFrame({
+            "Category": ["COGS", "Payroll", "Expenses"],
+            "Amount (€)": [cogs, total_payroll, total_expenses_amt]
+        })
+        st.bar_chart(breakdown.set_index("Category"))
+
+        st.divider()
+
+        st.subheader("Health Check")
+
+        checks = [
+            ("Gross margin > 60%",    gross_margin > 60),
+            ("Payroll < 35% revenue", (total_payroll / gross_revenue * 100) < 35 if gross_revenue > 0 else False),
+            ("Expenses < 30% revenue",(total_expenses_amt / gross_revenue * 100) < 30 if gross_revenue > 0 else False),
+            ("Net profit positive",   net_profit > 0),
+        ]
+
+        for check, passed in checks:
+            icon = "✅" if passed else "❌"
+            st.markdown(f"{icon} {check}")
+
+    st.divider()
+
+    # Summary table
+    st.subheader("Summary")
+    summary = pd.DataFrame([
+        {"Line Item": "Gross Revenue",            "Amount (€)": f"€{gross_revenue:,.2f}"},
+        {"Line Item": "Cost of Goods Sold (30%)", "Amount (€)": f"-€{cogs:,.2f}"},
+        {"Line Item": "Gross Profit",             "Amount (€)": f"€{gross_profit:,.2f}"},
+        {"Line Item": "Payroll",                  "Amount (€)": f"-€{total_payroll:,.2f}"},
+        {"Line Item": "Operating Expenses",       "Amount (€)": f"-€{total_expenses_amt:,.2f}"},
+        {"Line Item": "Net Profit / Loss",        "Amount (€)": f"€{net_profit:,.2f}"},
+    ])
+    st.dataframe(summary, use_container_width=True, hide_index=True)
