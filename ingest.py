@@ -9,9 +9,7 @@ Modes:
 import argparse
 import logging
 import os
-import sqlite3
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import psycopg2
@@ -23,7 +21,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 POS_API_URL            = os.getenv("POS_API_URL", "http://127.0.0.1:8000/sales")
 TRANSACTIONS_PER_FETCH = int(os.getenv("TRANSACTIONS_PER_FETCH", "20"))
 SCHEDULE_MINUTES       = int(os.getenv("SCHEDULE_MINUTES", "1"))
-DATABASE_URL           = os.getenv("DATABASE_URL")  # set by Railway automatically
+DATABASE_URL           = os.getenv("DATABASE_URL")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,12 +32,10 @@ log = logging.getLogger(__name__)
 
 # ── Database connection ────────────────────────────────────────────────────────
 
-def get_connection() -> psycopg2.extensions.connection:
-    """Return a Postgres connection using DATABASE_URL env variable."""
+def get_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL environment variable is not set.")
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
+    return psycopg2.connect(DATABASE_URL)
 
 
 # ── Database setup ─────────────────────────────────────────────────────────────
@@ -89,13 +85,22 @@ def init_db(conn) -> None:
                 error_msg   TEXT
             );
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS employees (
+                id              SERIAL PRIMARY KEY,
+                name            TEXT    UNIQUE NOT NULL,
+                role            TEXT    NOT NULL,
+                monthly_salary  NUMERIC(10, 2) NOT NULL,
+                start_date      DATE,
+                active          BOOLEAN NOT NULL DEFAULT TRUE
+            );
+        """)
     conn.commit()
 
 
 # ── Cursor ─────────────────────────────────────────────────────────────────────
 
 def get_cursor(conn) -> Optional[str]:
-    """Return the last_seen timestamp string, or None if this is the first run."""
     with conn.cursor() as cur:
         cur.execute("SELECT last_seen FROM cursor_state WHERE id = 1")
         row = cur.fetchone()
@@ -103,7 +108,6 @@ def get_cursor(conn) -> Optional[str]:
 
 
 def set_cursor(conn, timestamp: str) -> None:
-    """Save the high-water mark using real wall-clock time."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO cursor_state (id, last_seen) VALUES (1, %s)
@@ -114,17 +118,8 @@ def set_cursor(conn, timestamp: str) -> None:
 
 # ── Pipeline run logging ───────────────────────────────────────────────────────
 
-def log_run(
-    conn,
-    run_at: str,
-    fetched: int,
-    cleaned: int,
-    inserted: int,
-    skipped: int,
-    status: str = "success",
-    error_msg: Optional[str] = None,
-) -> None:
-    """Record this pipeline run in the pipeline_runs audit table."""
+def log_run(conn, run_at, fetched, cleaned, inserted, skipped,
+            status="success", error_msg=None):
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO pipeline_runs
@@ -137,7 +132,6 @@ def log_run(
 # ── Fetch ──────────────────────────────────────────────────────────────────────
 
 def fetch_sales(n: int) -> list[dict]:
-    """Fetch n transactions from the POS API."""
     resp = requests.get(POS_API_URL, params={"n": n}, timeout=10)
     resp.raise_for_status()
     return resp.json()["transactions"]
@@ -146,7 +140,6 @@ def fetch_sales(n: int) -> list[dict]:
 # ── Clean ──────────────────────────────────────────────────────────────────────
 
 def clean_transaction(raw: dict) -> dict | None:
-    """Validate and normalise a raw transaction. Returns None if invalid."""
     required = {"transaction_id", "timestamp", "total", "items"}
     if not required.issubset(raw):
         log.warning("Skipping transaction missing fields: %s", raw.get("transaction_id"))
@@ -176,7 +169,6 @@ def clean_transaction(raw: dict) -> dict | None:
 # ── Load ───────────────────────────────────────────────────────────────────────
 
 def load_transactions(conn, transactions: list[dict]) -> int:
-    """Insert transactions; skip duplicates. Returns count of new rows inserted."""
     now      = datetime.now().isoformat()
     inserted = 0
 
@@ -195,7 +187,7 @@ def load_transactions(conn, transactions: list[dict]) -> int:
                 ))
 
                 if cur.rowcount == 0:
-                    continue  # already existed — duplicate
+                    continue
 
                 for item in txn["items"]:
                     cur.execute("""
@@ -226,7 +218,6 @@ def run_pipeline() -> None:
     log.info("── Pipeline run starting ──")
     run_at = datetime.now().isoformat()
 
-    # Init DB and read cursor
     try:
         conn = get_connection()
         init_db(conn)
@@ -241,7 +232,6 @@ def run_pipeline() -> None:
     else:
         log.info("No cursor found — first run")
 
-    # Fetch
     try:
         raw = fetch_sales(TRANSACTIONS_PER_FETCH)
         log.info("Fetched %d transactions from POS API", len(raw))
@@ -253,7 +243,6 @@ def run_pipeline() -> None:
         conn.close()
         return
 
-    # Clean
     cleaned = [c for r in raw if (c := clean_transaction(r)) is not None]
     log.info("Cleaned: %d valid / %d total", len(cleaned), len(raw))
 
@@ -265,10 +254,9 @@ def run_pipeline() -> None:
         conn.close()
         return
 
-    # Load
     conn = get_connection()
-    new_rows   = load_transactions(conn, cleaned)
-    skipped    = len(cleaned) - new_rows
+    new_rows = load_transactions(conn, cleaned)
+    skipped  = len(cleaned) - new_rows
 
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM transactions")
@@ -299,7 +287,7 @@ if __name__ == "__main__":
         log.info("Scheduler mode: running every %d minute(s). Press Ctrl+C to stop.", SCHEDULE_MINUTES)
         scheduler = BlockingScheduler()
         scheduler.add_job(run_pipeline, "interval", minutes=SCHEDULE_MINUTES)
-        run_pipeline()  # run immediately on start
+        run_pipeline()
         try:
             scheduler.start()
         except KeyboardInterrupt:
