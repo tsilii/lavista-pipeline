@@ -4,8 +4,6 @@ Run with: streamlit run dashboard.py
 """
 
 import os
-from datetime import datetime, date
-
 import pandas as pd
 import psycopg2
 import streamlit as st
@@ -32,21 +30,16 @@ def load_sales_data():
     conn = get_conn()
     if not conn:
         return None, None, None
-
     txn   = pd.read_sql("SELECT * FROM transactions ORDER BY timestamp DESC", conn)
     items = pd.read_sql("SELECT * FROM transaction_items", conn)
-
     try:
         runs = pd.read_sql("SELECT * FROM pipeline_runs ORDER BY run_at DESC LIMIT 20", conn)
     except Exception:
         runs = pd.DataFrame()
-
     conn.close()
-
     txn["timestamp"] = pd.to_datetime(txn["timestamp"], utc=True)
     txn["date"]      = txn["timestamp"].dt.date
     txn["hour"]      = txn["timestamp"].dt.hour
-
     return txn, items, runs
 
 
@@ -61,6 +54,23 @@ def load_payroll_data():
         )
         conn.close()
         return employees
+    except Exception:
+        conn.close()
+        return None
+
+
+@st.cache_data(ttl=60)
+def load_expenses_data():
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        expenses = pd.read_sql(
+            "SELECT * FROM expenses ORDER BY month DESC, amount DESC", conn
+        )
+        conn.close()
+        expenses["month"] = pd.to_datetime(expenses["month"]).dt.date
+        return expenses
     except Exception:
         conn.close()
         return None
@@ -89,25 +99,16 @@ if page == "Sales":
         st.warning("No data yet — make sure DATABASE_URL is set and ingest.py has run.")
         st.stop()
 
-    # Sidebar filters
     with st.sidebar:
         st.header("Filters")
-
         min_date = txn["date"].min()
         max_date = txn["date"].max()
-        date_range = st.date_input(
-            "Date range",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date,
-        )
-
+        date_range = st.date_input("Date range", value=(min_date, max_date),
+                                   min_value=min_date, max_value=max_date)
         all_servers = sorted(txn["server"].dropna().unique().tolist())
         selected_servers = st.multiselect("Servers", options=all_servers, default=all_servers)
-
         all_methods = sorted(txn["payment_method"].dropna().unique().tolist())
         selected_methods = st.multiselect("Payment methods", options=all_methods, default=all_methods)
-
         st.divider()
         st.caption("Auto-refreshes every 30 s")
 
@@ -117,8 +118,7 @@ if page == "Sales":
         start_date = end_date = date_range
 
     filtered_txn = txn[
-        (txn["date"] >= start_date)
-        & (txn["date"] <= end_date)
+        (txn["date"] >= start_date) & (txn["date"] <= end_date)
         & (txn["server"].isin(selected_servers))
         & (txn["payment_method"].isin(selected_methods))
     ]
@@ -128,7 +128,6 @@ if page == "Sales":
         st.warning("No transactions match the current filters.")
         st.stop()
 
-    # KPIs
     total_revenue = filtered_txn["total"].sum()
     total_txns    = len(filtered_txn)
     avg_check     = filtered_txn["total"].mean()
@@ -148,7 +147,6 @@ if page == "Sales":
         daily = filtered_txn.groupby("date")["total"].sum().reset_index()
         daily.columns = ["Date", "Revenue (€)"]
         st.bar_chart(daily.set_index("Date"))
-
     with col_right:
         st.subheader("Transactions by Hour")
         hourly = filtered_txn.groupby("hour").size().reset_index(name="Count")
@@ -165,7 +163,6 @@ if page == "Sales":
         )
         top_items.columns = ["Item", "Revenue (€)"]
         st.bar_chart(top_items.set_index("Item"))
-
     with col_b:
         st.subheader("Revenue by Category")
         by_cat = (
@@ -183,7 +180,6 @@ if page == "Sales":
         pm = filtered_txn["payment_method"].value_counts().reset_index()
         pm.columns = ["Method", "Count"]
         st.dataframe(pm, use_container_width=True, hide_index=True)
-
     with col_s:
         st.subheader("Revenue by Server")
         by_server = (
@@ -196,7 +192,6 @@ if page == "Sales":
 
     st.divider()
 
-    # Pipeline health
     st.subheader("Pipeline Health")
     if runs.empty:
         st.info("No pipeline runs recorded yet.")
@@ -211,7 +206,6 @@ if page == "Sales":
             )
         else:
             st.error(f"Last run FAILED: {last_run['run_at']}  |  {last_run['error_msg']}")
-
         with st.expander("Recent pipeline runs"):
             display_runs = runs.rename(columns={
                 "run_at": "Run at", "fetched": "Fetched", "cleaned": "Cleaned",
@@ -221,7 +215,6 @@ if page == "Sales":
             st.dataframe(display_runs.drop(columns=["id"]), use_container_width=True, hide_index=True)
 
     st.divider()
-
     with st.expander("Raw Transactions"):
         st.dataframe(
             filtered_txn.drop(columns=["date", "hour"]).sort_values("timestamp", ascending=False),
@@ -242,22 +235,20 @@ elif page == "Payroll":
         st.warning("No employee data found. Run `python seed_employees.py` first.")
         st.stop()
 
-    # KPIs
     total_payroll = employees["monthly_salary"].sum()
     total_staff   = len(employees)
     avg_salary    = employees["monthly_salary"].mean()
     annual_cost   = total_payroll * 12
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Monthly Payroll",  f"€{total_payroll:,.2f}")
-    k2.metric("Total Staff",      f"{total_staff}")
-    k3.metric("Average Salary",   f"€{avg_salary:,.2f}")
-    k4.metric("Annual Cost",      f"€{annual_cost:,.2f}")
+    k1.metric("Monthly Payroll", f"€{total_payroll:,.2f}")
+    k2.metric("Total Staff",     f"{total_staff}")
+    k3.metric("Average Salary",  f"€{avg_salary:,.2f}")
+    k4.metric("Annual Cost",     f"€{annual_cost:,.2f}")
 
     st.divider()
 
     col_left, col_right = st.columns(2)
-
     with col_left:
         st.subheader("Monthly Cost by Role")
         by_role = (
@@ -266,7 +257,6 @@ elif page == "Payroll":
         )
         by_role.columns = ["Role", "Monthly Cost (€)"]
         st.bar_chart(by_role.set_index("Role"))
-
     with col_right:
         st.subheader("Salary Distribution")
         by_employee = employees[["name", "monthly_salary"]].copy()
@@ -285,18 +275,15 @@ elif page == "Payroll":
 
     st.divider()
 
-    # Payroll vs Revenue comparison
     st.subheader("Payroll vs Revenue")
     txn, _, _ = load_sales_data()
     if txn is not None and not txn.empty:
-        total_revenue = float(txn["total"].sum())
-        payroll_ratio = (float(total_payroll) / total_revenue * 100) if total_revenue > 0 else 0
-
+        total_revenue  = float(txn["total"].sum())
+        payroll_ratio  = (float(total_payroll) / total_revenue * 100) if total_revenue > 0 else 0
         col_a, col_b, col_c = st.columns(3)
         col_a.metric("Total Revenue (all time)", f"€{total_revenue:,.2f}")
         col_b.metric("Monthly Payroll",          f"€{total_payroll:,.2f}")
         col_c.metric("Payroll / Revenue",         f"{payroll_ratio:.1f}%")
-
         if payroll_ratio > 35:
             st.warning("Payroll is above 35% of revenue — industry benchmark is 25–35%.")
         else:
@@ -306,12 +293,84 @@ elif page == "Payroll":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE: EXPENSES (coming soon)
+# PAGE: EXPENSES
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Expenses":
     st.title("Lavista Restaurant — Expenses")
-    st.info("Expenses page coming soon.")
+
+    expenses = load_expenses_data()
+
+    if expenses is None or expenses.empty:
+        st.warning("No expenses found. Run `python seed_expenses.py` first.")
+        st.stop()
+
+    # Latest month available
+    latest_month   = expenses["month"].max()
+    month_expenses = expenses[expenses["month"] == latest_month]
+
+    total_expenses   = month_expenses["amount"].sum()
+    top_category     = month_expenses.groupby("category")["amount"].sum().idxmax()
+    top_cat_amount   = month_expenses.groupby("category")["amount"].sum().max()
+    num_categories   = month_expenses["category"].nunique()
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Monthly Expenses",   f"€{total_expenses:,.2f}")
+    k2.metric("Biggest Category",   top_category)
+    k3.metric("Category Amount",    f"€{top_cat_amount:,.2f}")
+    k4.metric("Categories",         f"{num_categories}")
+
+    st.divider()
+
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.subheader("Expenses by Category")
+        by_cat = (
+            month_expenses.groupby("category")["amount"]
+            .sum().sort_values(ascending=False).reset_index()
+        )
+        by_cat.columns = ["Category", "Amount (€)"]
+        st.bar_chart(by_cat.set_index("Category"))
+
+    with col_right:
+        st.subheader("Expense Breakdown")
+        display_exp = month_expenses[["category", "description", "amount"]].copy()
+        display_exp.columns = ["Category", "Description", "Amount (€)"]
+        display_exp["Amount (€)"] = display_exp["Amount (€)"].apply(lambda x: f"€{x:,.2f}")
+        st.dataframe(display_exp, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # Expenses vs Revenue
+    st.subheader("Expenses vs Revenue")
+    txn, _, _ = load_sales_data()
+    if txn is not None and not txn.empty:
+        total_revenue   = float(txn["total"].sum())
+        expenses_ratio  = (float(total_expenses) / total_revenue * 100) if total_revenue > 0 else 0
+
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Total Revenue (all time)", f"€{total_revenue:,.2f}")
+        col_b.metric("Monthly Expenses",         f"€{total_expenses:,.2f}")
+        col_c.metric("Expenses / Revenue",        f"{expenses_ratio:.1f}%")
+
+        if expenses_ratio > 30:
+            st.warning("Expenses are above 30% of revenue — review costs.")
+        else:
+            st.success("Expenses are within a healthy range.")
+    else:
+        st.info("No sales data available for comparison.")
+
+    # Month selector if multiple months exist
+    all_months = sorted(expenses["month"].unique(), reverse=True)
+    if len(all_months) > 1:
+        st.divider()
+        st.subheader("Historical Expenses")
+        monthly_totals = (
+            expenses.groupby("month")["amount"].sum().reset_index()
+        )
+        monthly_totals.columns = ["Month", "Total Expenses (€)"]
+        st.bar_chart(monthly_totals.set_index("Month"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
