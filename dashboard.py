@@ -1,5 +1,5 @@
 """
-Lavista Dashboard — Streamlit analytics on PostgreSQL.
+Sova Bistrot Dashboard — Streamlit analytics on PostgreSQL.
 Run with: streamlit run dashboard.py
 """
 
@@ -10,7 +10,46 @@ import streamlit as st
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-st.set_page_config(page_title="Lavista Sales Dashboard", layout="wide")
+st.set_page_config(page_title="Sova Bistrot", layout="wide", page_icon="🦉")
+
+OWL_SVG = """
+<svg width="160" height="160" viewBox="0 0 680 320" xmlns="http://www.w3.org/2000/svg">
+  <ellipse cx="340" cy="175" rx="58" ry="72" fill="#2c1e0f"/>
+  <ellipse cx="340" cy="190" rx="36" ry="50" fill="#c8a87a"/>
+  <path d="M322 158 Q340 162 358 158" stroke="#8b6914" stroke-width="1.2" fill="none" opacity="0.6"/>
+  <path d="M318 168 Q340 173 362 168" stroke="#8b6914" stroke-width="1.2" fill="none" opacity="0.6"/>
+  <path d="M316 178 Q340 184 364 178" stroke="#8b6914" stroke-width="1.2" fill="none" opacity="0.5"/>
+  <path d="M316 188 Q340 194 364 188" stroke="#8b6914" stroke-width="1.2" fill="none" opacity="0.5"/>
+  <path d="M318 198 Q340 204 362 198" stroke="#8b6914" stroke-width="1.2" fill="none" opacity="0.4"/>
+  <ellipse cx="340" cy="118" rx="46" ry="44" fill="#2c1e0f"/>
+  <polygon points="310,85 302,58 322,78" fill="#2c1e0f"/>
+  <polygon points="370,85 378,58 358,78" fill="#2c1e0f"/>
+  <polygon points="310,85 306,65 318,80" fill="#3d2a14"/>
+  <polygon points="370,85 374,65 362,80" fill="#3d2a14"/>
+  <ellipse cx="290" cy="188" rx="28" ry="55" fill="#1e130a" transform="rotate(-12 290 188)"/>
+  <ellipse cx="390" cy="188" rx="28" ry="55" fill="#1e130a" transform="rotate(12 390 188)"/>
+  <path d="M270 165 Q282 175 275 190" stroke="#3d2a14" stroke-width="1" fill="none"/>
+  <path d="M265 178 Q278 185 272 200" stroke="#3d2a14" stroke-width="1" fill="none"/>
+  <path d="M410 165 Q398 175 405 190" stroke="#3d2a14" stroke-width="1" fill="none"/>
+  <path d="M415 178 Q402 185 408 200" stroke="#3d2a14" stroke-width="1" fill="none"/>
+  <circle cx="322" cy="116" r="17" fill="#e8b84b"/>
+  <circle cx="358" cy="116" r="17" fill="#e8b84b"/>
+  <circle cx="322" cy="116" r="12" fill="#1a0f00"/>
+  <circle cx="358" cy="116" r="12" fill="#1a0f00"/>
+  <circle cx="326" cy="112" r="4" fill="#ffffff"/>
+  <circle cx="362" cy="112" r="4" fill="#ffffff"/>
+  <circle cx="322" cy="116" r="17" fill="none" stroke="#8b6914" stroke-width="1.5"/>
+  <circle cx="358" cy="116" r="17" fill="none" stroke="#8b6914" stroke-width="1.5"/>
+  <polygon points="340,126 330,134 350,134" fill="#e8b84b"/>
+  <polygon points="340,130 333,135 347,135" fill="#c8940a"/>
+  <line x1="325" y1="242" x2="310" y2="258" stroke="#8b6914" stroke-width="3" stroke-linecap="round"/>
+  <line x1="325" y1="242" x2="318" y2="260" stroke="#8b6914" stroke-width="3" stroke-linecap="round"/>
+  <line x1="325" y1="242" x2="326" y2="261" stroke="#8b6914" stroke-width="3" stroke-linecap="round"/>
+  <line x1="355" y1="242" x2="370" y2="258" stroke="#8b6914" stroke-width="3" stroke-linecap="round"/>
+  <line x1="355" y1="242" x2="362" y2="260" stroke="#8b6914" stroke-width="3" stroke-linecap="round"/>
+  <line x1="355" y1="242" x2="354" y2="261" stroke="#8b6914" stroke-width="3" stroke-linecap="round"/>
+</svg>
+"""
 
 # ── Database connection ────────────────────────────────────────────────────────
 
@@ -80,18 +119,146 @@ def load_expenses_data():
 
 page = st.sidebar.selectbox(
     "Navigation",
-    ["Sales", "Payroll", "Expenses", "Inventory", "P&L"],
+    ["Home", "Sales", "Payroll", "Expenses", "Inventory", "P&L"],
     index=0,
 )
 
 st.sidebar.divider()
+st.sidebar.markdown(OWL_SVG, unsafe_allow_html=True)
+st.sidebar.markdown(
+    "<div style='text-align:center; font-size:11px; color:#8b6914; letter-spacing:3px; margin-top:-8px;'>SOVA BISTROT</div>",
+    unsafe_allow_html=True
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: HOME
+# ══════════════════════════════════════════════════════════════════════════════
+
+if page == "Home":
+
+    # Hero section
+    col_logo, col_title = st.columns([1, 3])
+
+    with col_logo:
+        st.markdown(OWL_SVG, unsafe_allow_html=True)
+
+    with col_title:
+        st.markdown(
+            """
+            <div style='padding-top: 20px;'>
+                <div style='font-size: 42px; font-weight: 700; letter-spacing: 2px;'>SOVA</div>
+                <div style='font-size: 16px; letter-spacing: 6px; color: #8b6914; margin-top: -8px;'>BISTROT</div>
+                <div style='font-size: 15px; color: gray; margin-top: 12px;'>
+                    Business Intelligence Dashboard
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    st.divider()
+
+    # Live KPIs
+    txn, items, runs = load_sales_data()
+    employees        = load_payroll_data()
+    expenses         = load_expenses_data()
+
+    st.subheader("Live Overview")
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+
+    if txn is not None and not txn.empty:
+        k1.metric("Total Revenue",    f"€{txn['total'].sum():,.2f}")
+        k2.metric("Transactions",     f"{len(txn):,}")
+        k3.metric("Avg Check",        f"€{txn['total'].mean():.2f}")
+    else:
+        k1.metric("Total Revenue",    "—")
+        k2.metric("Transactions",     "—")
+        k3.metric("Avg Check",        "—")
+
+    if employees is not None and not employees.empty:
+        k4.metric("Monthly Payroll",  f"€{employees['monthly_salary'].sum():,.2f}")
+    else:
+        k4.metric("Monthly Payroll",  "—")
+
+    if expenses is not None and not expenses.empty:
+        latest = expenses["month"].max()
+        k5.metric("Monthly Expenses", f"€{expenses[expenses['month']==latest]['amount'].sum():,.2f}")
+    else:
+        k5.metric("Monthly Expenses", "—")
+
+    st.divider()
+
+    # Dashboard pages overview
+    st.subheader("Dashboard Pages")
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.markdown("#### 📊 Sales")
+        st.markdown(
+            "Revenue by day and hour, top selling items, "
+            "category breakdown, server performance, payment methods."
+        )
+
+    with c2:
+        st.markdown("#### 👥 Payroll")
+        st.markdown(
+            "Staff overview, salary distribution by role, "
+            "monthly payroll cost, payroll vs revenue ratio."
+        )
+
+    with c3:
+        st.markdown("#### 🧾 Expenses")
+        st.markdown(
+            "Monthly fixed costs by category, expense breakdown, "
+            "expenses vs revenue ratio, historical trends."
+        )
+
+    c4, c5, c6 = st.columns(3)
+
+    with c4:
+        st.markdown("#### 📦 Inventory")
+        st.markdown("Coming soon — stock levels, low stock alerts, waste tracking.")
+
+    with c5:
+        st.markdown("#### 📈 P&L")
+        st.markdown(
+            "Full profit & loss statement — gross profit, "
+            "operating expenses, net margin, health checks."
+        )
+
+    with c6:
+        st.markdown("#### ⚙️ Pipeline")
+        st.markdown(
+            "Data ingests automatically every minute from the POS system "
+            "into PostgreSQL via Railway."
+        )
+
+    st.divider()
+
+    # Pipeline status
+    st.subheader("Pipeline Status")
+    if runs is not None and not runs.empty:
+        last_run = runs.iloc[0]
+        if last_run["status"] == "success":
+            st.success(
+                f"Last ingestion: {last_run['run_at']}  |  "
+                f"Inserted {last_run['inserted']} new rows  |  "
+                f"DB total: {len(txn):,} transactions"
+            )
+        else:
+            st.error(f"Last ingestion FAILED: {last_run['run_at']}  |  {last_run['error_msg']}")
+    else:
+        st.info("No pipeline runs recorded yet.")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: SALES
 # ══════════════════════════════════════════════════════════════════════════════
 
-if page == "Sales":
-    st.title("Lavista Restaurant — Sales Dashboard")
+elif page == "Sales":
+    st.title("Sova Bistrot — Sales")
 
     txn, items, runs = load_sales_data()
 
@@ -227,7 +394,7 @@ if page == "Sales":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Payroll":
-    st.title("Lavista Restaurant — Payroll")
+    st.title("Sova Bistrot — Payroll")
 
     employees = load_payroll_data()
 
@@ -297,7 +464,7 @@ elif page == "Payroll":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Expenses":
-    st.title("Lavista Restaurant — Expenses")
+    st.title("Sova Bistrot — Expenses")
 
     expenses = load_expenses_data()
 
@@ -365,11 +532,11 @@ elif page == "Expenses":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE: INVENTORY (coming soon)
+# PAGE: INVENTORY
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Inventory":
-    st.title("Lavista Restaurant — Inventory")
+    st.title("Sova Bistrot — Inventory")
     st.info("Inventory page coming soon.")
 
 
@@ -378,11 +545,10 @@ elif page == "Inventory":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "P&L":
-    st.title("Lavista Restaurant — Profit & Loss")
+    st.title("Sova Bistrot — Profit & Loss")
 
-    COGS_RATE = 0.30  # industry standard: 30% of revenue goes to food cost
+    COGS_RATE = 0.30
 
-    # Load all data
     txn, _, _  = load_sales_data()
     employees  = load_payroll_data()
     expenses   = load_expenses_data()
@@ -390,45 +556,34 @@ elif page == "P&L":
     if txn is None or txn.empty:
         st.warning("No sales data found.")
         st.stop()
-
     if employees is None or employees.empty:
         st.warning("No payroll data found. Run `python seed_employees.py` first.")
         st.stop()
-
     if expenses is None or expenses.empty:
         st.warning("No expenses data found. Run `python seed_expenses.py` first.")
         st.stop()
-
-    # ── Calculations ──────────────────────────────────────────────────────────
 
     gross_revenue      = float(txn["total"].sum())
     cogs               = gross_revenue * COGS_RATE
     gross_profit       = gross_revenue - cogs
     gross_margin       = (gross_profit / gross_revenue * 100) if gross_revenue > 0 else 0
-
     total_payroll      = float(employees["monthly_salary"].sum())
-
     latest_month       = expenses["month"].max()
     month_expenses     = expenses[expenses["month"] == latest_month]
     total_expenses_amt = float(month_expenses["amount"].sum())
-
     total_opex         = total_payroll + total_expenses_amt
     net_profit         = gross_profit - total_opex
     net_margin         = (net_profit / gross_revenue * 100) if gross_revenue > 0 else 0
 
-    # ── KPI row ───────────────────────────────────────────────────────────────
-
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Gross Revenue",  f"€{gross_revenue:,.2f}")
-    k2.metric("Gross Profit",   f"€{gross_profit:,.2f}")
-    k3.metric("Net Profit",     f"€{net_profit:,.2f}",
+    k1.metric("Gross Revenue", f"€{gross_revenue:,.2f}")
+    k2.metric("Gross Profit",  f"€{gross_profit:,.2f}")
+    k3.metric("Net Profit",    f"€{net_profit:,.2f}",
               delta=f"{net_margin:.1f}% margin",
               delta_color="normal" if net_profit >= 0 else "inverse")
-    k4.metric("Gross Margin",   f"{gross_margin:.1f}%")
+    k4.metric("Gross Margin",  f"{gross_margin:.1f}%")
 
     st.divider()
-
-    # ── P&L Statement ─────────────────────────────────────────────────────────
 
     col_left, col_right = st.columns([2, 1])
 
@@ -436,52 +591,38 @@ elif page == "P&L":
         st.subheader("P&L Statement")
 
         def pl_row(label, amount, bold=False, indent=False, positive_is_good=True):
-            prefix   = "　　" if indent else ""
-            color    = "green" if (amount >= 0 and positive_is_good) else "red"
-            sign     = "+" if amount >= 0 else ""
+            prefix = "　　" if indent else ""
+            color  = "green" if (amount >= 0 and positive_is_good) else "red"
+            sign   = "+" if amount >= 0 else ""
             if bold:
-                st.markdown(
-                    f"**{prefix}{label}** &nbsp;&nbsp;&nbsp; "
-                    f"**:{color}[{sign}€{abs(amount):,.2f}]**"
-                )
+                st.markdown(f"**{prefix}{label}** &nbsp;&nbsp;&nbsp; **:{color}[{sign}€{abs(amount):,.2f}]**")
             else:
-                st.markdown(
-                    f"{prefix}{label} &nbsp;&nbsp;&nbsp; "
-                    f":{color}[{sign}€{abs(amount):,.2f}]"
-                )
+                st.markdown(f"{prefix}{label} &nbsp;&nbsp;&nbsp; :{color}[{sign}€{abs(amount):,.2f}]")
 
-        # Revenue
         st.markdown("#### Revenue")
         pl_row("Total Sales", gross_revenue, bold=True)
         st.markdown("---")
 
-        # COGS
         st.markdown("#### Cost of Goods Sold")
         pl_row("Food & Beverage Cost (est. 30%)", -cogs, indent=True, positive_is_good=False)
-        st.caption("⚠️ COGS estimated at industry standard 30% — not tracked directly")
+        st.caption("COGS estimated at industry standard 30% — not tracked directly")
         pl_row("Gross Profit", gross_profit, bold=True)
         st.markdown(f"*Gross Margin: {gross_margin:.1f}%*")
         st.markdown("---")
 
-        # Operating expenses
         st.markdown("#### Operating Expenses")
         pl_row("Payroll", -total_payroll, indent=True, positive_is_good=False)
-
-        # Break down expenses by category
         by_cat = month_expenses.groupby("category")["amount"].sum()
         for cat, amt in by_cat.sort_values(ascending=False).items():
             pl_row(cat, -amt, indent=True, positive_is_good=False)
-
         pl_row("Total Operating Expenses", -total_opex, bold=True, positive_is_good=False)
         st.markdown("---")
 
-        # Net profit
         pl_row("Net Profit / Loss", net_profit, bold=True)
         st.markdown(f"*Net Margin: {net_margin:.1f}%*")
 
     with col_right:
         st.subheader("Cost Breakdown")
-
         breakdown = pd.DataFrame({
             "Category": ["COGS", "Payroll", "Expenses"],
             "Amount (€)": [cogs, total_payroll, total_expenses_amt]
@@ -489,23 +630,19 @@ elif page == "P&L":
         st.bar_chart(breakdown.set_index("Category"))
 
         st.divider()
-
         st.subheader("Health Check")
-
         checks = [
-            ("Gross margin > 60%",    gross_margin > 60),
-            ("Payroll < 35% revenue", (total_payroll / gross_revenue * 100) < 35 if gross_revenue > 0 else False),
-            ("Expenses < 30% revenue",(total_expenses_amt / gross_revenue * 100) < 30 if gross_revenue > 0 else False),
-            ("Net profit positive",   net_profit > 0),
+            ("Gross margin > 60%",     gross_margin > 60),
+            ("Payroll < 35% revenue",  (total_payroll / gross_revenue * 100) < 35 if gross_revenue > 0 else False),
+            ("Expenses < 30% revenue", (total_expenses_amt / gross_revenue * 100) < 30 if gross_revenue > 0 else False),
+            ("Net profit positive",    net_profit > 0),
         ]
-
         for check, passed in checks:
             icon = "✅" if passed else "❌"
             st.markdown(f"{icon} {check}")
 
     st.divider()
 
-    # Summary table
     st.subheader("Summary")
     summary = pd.DataFrame([
         {"Line Item": "Gross Revenue",            "Amount (€)": f"€{gross_revenue:,.2f}"},
