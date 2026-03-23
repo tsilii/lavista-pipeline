@@ -4,6 +4,7 @@ Run with: streamlit run dashboard.py
 """
 
 import os
+from datetime import date
 import pandas as pd
 import psycopg2
 import streamlit as st
@@ -51,6 +52,11 @@ OWL_SVG = """
 </svg>
 """
 
+EXPENSE_CATEGORIES = [
+    "Rent", "Utilities", "Supplies", "Software",
+    "Professional", "Insurance", "Marketing", "Maintenance", "Other"
+]
+
 # ── Database connection ────────────────────────────────────────────────────────
 
 def get_conn():
@@ -79,6 +85,7 @@ def load_sales_data():
     txn["timestamp"] = pd.to_datetime(txn["timestamp"], utc=True)
     txn["date"]      = txn["timestamp"].dt.date
     txn["hour"]      = txn["timestamp"].dt.hour
+    txn["month"]     = txn["timestamp"].dt.to_period("M")
     return txn, items, runs
 
 
@@ -98,7 +105,7 @@ def load_payroll_data():
         return None
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=10)
 def load_expenses_data():
     conn = get_conn()
     if not conn:
@@ -113,6 +120,44 @@ def load_expenses_data():
     except Exception:
         conn.close()
         return None
+
+
+# ── Expense write operations ───────────────────────────────────────────────────
+
+def add_expense(category, description, amount, month):
+    conn = get_conn()
+    if not conn:
+        return False, "Could not connect to database."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO expenses (category, description, amount, frequency, month)
+                VALUES (%s, %s, %s, 'monthly', %s)
+                ON CONFLICT (description, month) DO UPDATE SET
+                    category = EXCLUDED.category,
+                    amount   = EXCLUDED.amount
+            """, (category, description, amount, month))
+        conn.commit()
+        conn.close()
+        return True, f"Expense '{description}' saved for {month.strftime('%B %Y')}."
+    except Exception as e:
+        conn.close()
+        return False, str(e)
+
+
+def delete_expense(expense_id):
+    conn = get_conn()
+    if not conn:
+        return False, "Could not connect to database."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
+        conn.commit()
+        conn.close()
+        return True, "Expense deleted."
+    except Exception as e:
+        conn.close()
+        return False, str(e)
 
 
 # ── Navigation ─────────────────────────────────────────────────────────────────
@@ -135,22 +180,16 @@ st.sidebar.markdown(
 # ══════════════════════════════════════════════════════════════════════════════
 
 if page == "Home":
-
-    # Hero section
     col_logo, col_title = st.columns([1, 3])
-
     with col_logo:
         st.markdown(OWL_SVG, unsafe_allow_html=True)
-
     with col_title:
         st.markdown(
             """
             <div style='padding-top: 20px;'>
                 <div style='font-size: 42px; font-weight: 700; letter-spacing: 2px;'>SOVA</div>
                 <div style='font-size: 16px; letter-spacing: 6px; color: #8b6914; margin-top: -8px;'>BISTROT</div>
-                <div style='font-size: 15px; color: gray; margin-top: 12px;'>
-                    Business Intelligence Dashboard
-                </div>
+                <div style='font-size: 15px; color: gray; margin-top: 12px;'>Business Intelligence Dashboard</div>
             </div>
             """,
             unsafe_allow_html=True
@@ -158,28 +197,26 @@ if page == "Home":
 
     st.divider()
 
-    # Live KPIs
     txn, items, runs = load_sales_data()
     employees        = load_payroll_data()
     expenses         = load_expenses_data()
 
     st.subheader("Live Overview")
-
     k1, k2, k3, k4, k5 = st.columns(5)
 
     if txn is not None and not txn.empty:
-        k1.metric("Total Revenue",    f"€{txn['total'].sum():,.2f}")
-        k2.metric("Transactions",     f"{len(txn):,}")
-        k3.metric("Avg Check",        f"€{txn['total'].mean():.2f}")
+        k1.metric("Total Revenue",   f"€{txn['total'].sum():,.2f}")
+        k2.metric("Transactions",    f"{len(txn):,}")
+        k3.metric("Avg Check",       f"€{txn['total'].mean():.2f}")
     else:
-        k1.metric("Total Revenue",    "—")
-        k2.metric("Transactions",     "—")
-        k3.metric("Avg Check",        "—")
+        k1.metric("Total Revenue",   "—")
+        k2.metric("Transactions",    "—")
+        k3.metric("Avg Check",       "—")
 
     if employees is not None and not employees.empty:
-        k4.metric("Monthly Payroll",  f"€{employees['monthly_salary'].sum():,.2f}")
+        k4.metric("Monthly Payroll", f"€{employees['monthly_salary'].sum():,.2f}")
     else:
-        k4.metric("Monthly Payroll",  "—")
+        k4.metric("Monthly Payroll", "—")
 
     if expenses is not None and not expenses.empty:
         latest = expenses["month"].max()
@@ -188,56 +225,31 @@ if page == "Home":
         k5.metric("Monthly Expenses", "—")
 
     st.divider()
-
-    # Dashboard pages overview
     st.subheader("Dashboard Pages")
 
     c1, c2, c3 = st.columns(3)
-
     with c1:
         st.markdown("#### 📊 Sales")
-        st.markdown(
-            "Revenue by day and hour, top selling items, "
-            "category breakdown, server performance, payment methods."
-        )
-
+        st.markdown("Revenue by day and hour, top selling items, category breakdown, server performance, payment methods.")
     with c2:
         st.markdown("#### 👥 Payroll")
-        st.markdown(
-            "Staff overview, salary distribution by role, "
-            "monthly payroll cost, payroll vs revenue ratio."
-        )
-
+        st.markdown("Staff overview, salary distribution by role, monthly payroll cost, payroll vs revenue ratio.")
     with c3:
         st.markdown("#### 🧾 Expenses")
-        st.markdown(
-            "Monthly fixed costs by category, expense breakdown, "
-            "expenses vs revenue ratio, historical trends."
-        )
+        st.markdown("Monthly costs by category, add/edit/delete expenses directly from the dashboard.")
 
     c4, c5, c6 = st.columns(3)
-
     with c4:
         st.markdown("#### 📦 Inventory")
         st.markdown("Coming soon — stock levels, low stock alerts, waste tracking.")
-
     with c5:
         st.markdown("#### 📈 P&L")
-        st.markdown(
-            "Full profit & loss statement — gross profit, "
-            "operating expenses, net margin, health checks."
-        )
-
+        st.markdown("Full profit & loss statement — gross profit, operating expenses, net margin, health checks.")
     with c6:
         st.markdown("#### ⚙️ Pipeline")
-        st.markdown(
-            "Data ingests automatically every minute from the POS system "
-            "into PostgreSQL via Railway."
-        )
+        st.markdown("Data ingests automatically every minute from the POS system into PostgreSQL via Railway.")
 
     st.divider()
-
-    # Pipeline status
     st.subheader("Pipeline Status")
     if runs is not None and not runs.empty:
         last_run = runs.iloc[0]
@@ -266,30 +278,37 @@ elif page == "Sales":
         st.warning("No data yet — make sure DATABASE_URL is set and ingest.py has run.")
         st.stop()
 
+    # ── Month selector ─────────────────────────────────────────────────────────
+    all_months   = sorted(txn["month"].unique(), reverse=True)
+    month_labels = {m: m.strftime("%B %Y") for m in all_months}
+
+    col_month, col_spacer = st.columns([2, 4])
+    with col_month:
+        selected_month = st.selectbox(
+            "Viewing month",
+            options=all_months,
+            format_func=lambda m: month_labels[m],
+        )
+
+    # Filter transactions to selected month
+    month_txn   = txn[txn["month"] == selected_month]
+    month_items = items[items["transaction_id"].isin(month_txn["transaction_id"])]
+
+    # ── Additional sidebar filters ─────────────────────────────────────────────
     with st.sidebar:
         st.header("Filters")
-        min_date = txn["date"].min()
-        max_date = txn["date"].max()
-        date_range = st.date_input("Date range", value=(min_date, max_date),
-                                   min_value=min_date, max_value=max_date)
-        all_servers = sorted(txn["server"].dropna().unique().tolist())
+        all_servers = sorted(month_txn["server"].dropna().unique().tolist())
         selected_servers = st.multiselect("Servers", options=all_servers, default=all_servers)
-        all_methods = sorted(txn["payment_method"].dropna().unique().tolist())
+        all_methods = sorted(month_txn["payment_method"].dropna().unique().tolist())
         selected_methods = st.multiselect("Payment methods", options=all_methods, default=all_methods)
         st.divider()
         st.caption("Auto-refreshes every 30 s")
 
-    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-        start_date, end_date = date_range
-    else:
-        start_date = end_date = date_range
-
-    filtered_txn = txn[
-        (txn["date"] >= start_date) & (txn["date"] <= end_date)
-        & (txn["server"].isin(selected_servers))
-        & (txn["payment_method"].isin(selected_methods))
+    filtered_txn = month_txn[
+        month_txn["server"].isin(selected_servers)
+        & month_txn["payment_method"].isin(selected_methods)
     ]
-    filtered_items = items[items["transaction_id"].isin(filtered_txn["transaction_id"])]
+    filtered_items = month_items[month_items["transaction_id"].isin(filtered_txn["transaction_id"])]
 
     if filtered_txn.empty:
         st.warning("No transactions match the current filters.")
@@ -358,7 +377,6 @@ elif page == "Sales":
         st.dataframe(by_server, use_container_width=True, hide_index=True)
 
     st.divider()
-
     st.subheader("Pipeline Health")
     if runs.empty:
         st.info("No pipeline runs recorded yet.")
@@ -384,7 +402,7 @@ elif page == "Sales":
     st.divider()
     with st.expander("Raw Transactions"):
         st.dataframe(
-            filtered_txn.drop(columns=["date", "hour"]).sort_values("timestamp", ascending=False),
+            filtered_txn.drop(columns=["date", "hour", "month"]).sort_values("timestamp", ascending=False),
             use_container_width=True, hide_index=True,
         )
 
@@ -397,10 +415,27 @@ elif page == "Payroll":
     st.title("Sova Bistrot — Payroll")
 
     employees = load_payroll_data()
+    txn, _, _ = load_sales_data()
 
     if employees is None or employees.empty:
         st.warning("No employee data found. Run `python seed_employees.py` first.")
         st.stop()
+
+    # ── Month selector ─────────────────────────────────────────────────────────
+    if txn is not None and not txn.empty:
+        all_months   = sorted(txn["month"].unique(), reverse=True)
+        col_month, col_spacer = st.columns([2, 4])
+        with col_month:
+            selected_month = st.selectbox(
+                "Viewing month",
+                options=all_months,
+                format_func=lambda m: m.strftime("%B %Y"),
+            )
+        month_txn     = txn[txn["month"] == selected_month]
+        month_revenue = float(month_txn["total"].sum())
+    else:
+        selected_month = None
+        month_revenue  = 0.0
 
     total_payroll = employees["monthly_salary"].sum()
     total_staff   = len(employees)
@@ -431,7 +466,6 @@ elif page == "Payroll":
         st.bar_chart(by_employee.set_index("Employee"))
 
     st.divider()
-
     st.subheader("Staff Overview")
     display_employees = employees[["name", "role", "monthly_salary", "start_date"]].copy()
     display_employees.columns = ["Name", "Role", "Monthly Salary (€)", "Start Date"]
@@ -441,22 +475,20 @@ elif page == "Payroll":
     st.dataframe(display_employees, use_container_width=True, hide_index=True)
 
     st.divider()
+    st.subheader(f"Payroll vs Revenue — {selected_month.strftime('%B %Y') if selected_month else ''}")
 
-    st.subheader("Payroll vs Revenue")
-    txn, _, _ = load_sales_data()
-    if txn is not None and not txn.empty:
-        total_revenue  = float(txn["total"].sum())
-        payroll_ratio  = (float(total_payroll) / total_revenue * 100) if total_revenue > 0 else 0
+    if month_revenue > 0:
+        payroll_ratio = (float(total_payroll) / month_revenue * 100)
         col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Total Revenue (all time)", f"€{total_revenue:,.2f}")
-        col_b.metric("Monthly Payroll",          f"€{total_payroll:,.2f}")
-        col_c.metric("Payroll / Revenue",         f"{payroll_ratio:.1f}%")
+        col_a.metric(f"Revenue ({selected_month.strftime('%B %Y')})", f"€{month_revenue:,.2f}")
+        col_b.metric("Monthly Payroll",   f"€{total_payroll:,.2f}")
+        col_c.metric("Payroll / Revenue", f"{payroll_ratio:.1f}%")
         if payroll_ratio > 35:
             st.warning("Payroll is above 35% of revenue — industry benchmark is 25–35%.")
         else:
             st.success("Payroll is within the healthy industry benchmark of 25–35% of revenue.")
     else:
-        st.info("No sales data available for comparison.")
+        st.info("No sales data available for the selected month.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -469,66 +501,132 @@ elif page == "Expenses":
     expenses = load_expenses_data()
 
     if expenses is None or expenses.empty:
-        st.warning("No expenses found. Run `python seed_expenses.py` first.")
-        st.stop()
-
-    latest_month   = expenses["month"].max()
-    month_expenses = expenses[expenses["month"] == latest_month]
-
-    total_expenses  = month_expenses["amount"].sum()
-    top_category    = month_expenses.groupby("category")["amount"].sum().idxmax()
-    top_cat_amount  = month_expenses.groupby("category")["amount"].sum().max()
-    num_categories  = month_expenses["category"].nunique()
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Monthly Expenses",  f"€{total_expenses:,.2f}")
-    k2.metric("Biggest Category",  top_category)
-    k3.metric("Category Amount",   f"€{top_cat_amount:,.2f}")
-    k4.metric("Categories",        f"{num_categories}")
-
-    st.divider()
-
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.subheader("Expenses by Category")
-        by_cat = (
-            month_expenses.groupby("category")["amount"]
-            .sum().sort_values(ascending=False).reset_index()
-        )
-        by_cat.columns = ["Category", "Amount (€)"]
-        st.bar_chart(by_cat.set_index("Category"))
-    with col_right:
-        st.subheader("Expense Breakdown")
-        display_exp = month_expenses[["category", "description", "amount"]].copy()
-        display_exp.columns = ["Category", "Description", "Amount (€)"]
-        display_exp["Amount (€)"] = display_exp["Amount (€)"].apply(lambda x: f"€{x:,.2f}")
-        st.dataframe(display_exp, use_container_width=True, hide_index=True)
-
-    st.divider()
-
-    st.subheader("Expenses vs Revenue")
-    txn, _, _ = load_sales_data()
-    if txn is not None and not txn.empty:
-        total_revenue   = float(txn["total"].sum())
-        expenses_ratio  = (float(total_expenses) / total_revenue * 100) if total_revenue > 0 else 0
-        col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Total Revenue (all time)", f"€{total_revenue:,.2f}")
-        col_b.metric("Monthly Expenses",         f"€{total_expenses:,.2f}")
-        col_c.metric("Expenses / Revenue",        f"{expenses_ratio:.1f}%")
-        if expenses_ratio > 30:
-            st.warning("Expenses are above 30% of revenue — review costs.")
-        else:
-            st.success("Expenses are within a healthy range.")
+        st.warning("No expenses found. Add your first expense below.")
     else:
-        st.info("No sales data available for comparison.")
+        all_months = sorted(expenses["month"].unique(), reverse=True)
+        selected_month = st.selectbox(
+            "Viewing month",
+            options=all_months,
+            format_func=lambda d: d.strftime("%B %Y"),
+        )
 
-    all_months = sorted(expenses["month"].unique(), reverse=True)
-    if len(all_months) > 1:
-        st.divider()
-        st.subheader("Historical Expenses")
-        monthly_totals = expenses.groupby("month")["amount"].sum().reset_index()
-        monthly_totals.columns = ["Month", "Total Expenses (€)"]
-        st.bar_chart(monthly_totals.set_index("Month"))
+        month_expenses = expenses[expenses["month"] == selected_month]
+
+        if not month_expenses.empty:
+            total_expenses  = month_expenses["amount"].sum()
+            top_category    = month_expenses.groupby("category")["amount"].sum().idxmax()
+            top_cat_amount  = month_expenses.groupby("category")["amount"].sum().max()
+            num_categories  = month_expenses["category"].nunique()
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Monthly Expenses",  f"€{total_expenses:,.2f}")
+            k2.metric("Biggest Category",  top_category)
+            k3.metric("Category Amount",   f"€{top_cat_amount:,.2f}")
+            k4.metric("Categories",        f"{num_categories}")
+
+            st.divider()
+
+            col_left, col_right = st.columns(2)
+            with col_left:
+                st.subheader("Expenses by Category")
+                by_cat = (
+                    month_expenses.groupby("category")["amount"]
+                    .sum().sort_values(ascending=False).reset_index()
+                )
+                by_cat.columns = ["Category", "Amount (€)"]
+                st.bar_chart(by_cat.set_index("Category"))
+            with col_right:
+                st.subheader("Expense Breakdown")
+                display_exp = month_expenses[["id", "category", "description", "amount"]].copy()
+                display_exp["amount"] = display_exp["amount"].apply(lambda x: f"€{x:,.2f}")
+                display_exp.columns = ["ID", "Category", "Description", "Amount (€)"]
+                st.dataframe(display_exp, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            st.subheader("Expenses vs Revenue")
+            txn, _, _ = load_sales_data()
+            if txn is not None and not txn.empty:
+                import pandas as pd
+                selected_period = pd.Period(selected_month.strftime("%Y-%m"), "M")
+                month_txn      = txn[txn["month"] == selected_period]
+                month_revenue  = float(month_txn["total"].sum())
+
+                if month_revenue > 0:
+                    expenses_ratio = float(total_expenses) / month_revenue * 100
+                    col_a, col_b, col_c = st.columns(3)
+                    col_a.metric(f"Revenue ({selected_month.strftime('%B %Y')})", f"€{month_revenue:,.2f}")
+                    col_b.metric("Monthly Expenses",    f"€{total_expenses:,.2f}")
+                    col_c.metric("Expenses / Revenue",  f"{expenses_ratio:.1f}%")
+                    if expenses_ratio > 30:
+                        st.warning("Expenses are above 30% of revenue — review costs.")
+                    else:
+                        st.success("Expenses are within a healthy range.")
+                else:
+                    st.info("No sales data for this month.")
+
+            if len(all_months) > 1:
+                st.divider()
+                st.subheader("Historical Expenses")
+                monthly_totals = expenses.groupby("month")["amount"].sum().reset_index()
+                monthly_totals.columns = ["Month", "Total Expenses (€)"]
+                st.bar_chart(monthly_totals.set_index("Month"))
+
+    st.divider()
+    st.subheader("Manage Expenses")
+
+    tab_add, tab_delete = st.tabs(["Add / Update", "Delete"])
+
+    with tab_add:
+        st.markdown("Add a new expense or update an existing one. If the same description already exists for the selected month, the amount will be updated.")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            form_month       = st.date_input("Month", value=date.today().replace(day=1))
+            form_category    = st.selectbox("Category", options=EXPENSE_CATEGORIES)
+            form_description = st.text_input("Description", placeholder="e.g. Electricity bill March")
+        with col2:
+            form_amount = st.number_input("Amount (€)", min_value=0.0, step=10.0, format="%.2f")
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+            submit = st.button("Save Expense", type="primary", use_container_width=True)
+
+        if submit:
+            if not form_description.strip():
+                st.error("Please enter a description.")
+            elif form_amount <= 0:
+                st.error("Amount must be greater than zero.")
+            else:
+                month_first = form_month.replace(day=1)
+                success, message = add_expense(form_category, form_description.strip(), form_amount, month_first)
+                if success:
+                    st.success(message)
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error(f"Error: {message}")
+
+    with tab_delete:
+        expenses_fresh = load_expenses_data()
+        if expenses_fresh is None or expenses_fresh.empty:
+            st.info("No expenses to delete.")
+        else:
+            st.markdown("Select an expense to delete. This cannot be undone.")
+            options = {
+                f"[{row['id']}] {row['description']} — {row['month'].strftime('%B %Y')} — €{row['amount']:,.2f}": row["id"]
+                for _, row in expenses_fresh.iterrows()
+            }
+            selected_label = st.selectbox("Select expense to delete", options=list(options.keys()))
+            selected_id    = options[selected_label]
+
+            if st.button("Delete Expense", type="primary", use_container_width=True):
+                success, message = delete_expense(selected_id)
+                if success:
+                    st.success(message)
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error(f"Error: {message}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -560,17 +658,39 @@ elif page == "P&L":
         st.warning("No payroll data found. Run `python seed_employees.py` first.")
         st.stop()
     if expenses is None or expenses.empty:
-        st.warning("No expenses data found. Run `python seed_expenses.py` first.")
+        st.warning("No expenses data found. Add expenses in the Expenses page.")
         st.stop()
 
-    gross_revenue      = float(txn["total"].sum())
+    # Month selector — intersection of sales months and expense months
+    import pandas as pd
+    sales_months   = set(txn["month"].unique())
+    expense_months = set(
+        pd.Period(d.strftime("%Y-%m"), "M") for d in expenses["month"].unique()
+    )
+    common_months  = sorted(sales_months & expense_months, reverse=True)
+
+    if not common_months:
+        st.warning("No months have both sales and expenses data yet.")
+        st.stop()
+
+    col_month, col_spacer = st.columns([2, 4])
+    with col_month:
+        selected_month = st.selectbox(
+            "P&L for month",
+            options=common_months,
+            format_func=lambda m: m.strftime("%B %Y"),
+        )
+
+    month_txn          = txn[txn["month"] == selected_month]
+    expense_date       = date(selected_month.year, selected_month.month, 1)
+    month_expenses_df  = expenses[expenses["month"] == expense_date]
+
+    gross_revenue      = float(month_txn["total"].sum())
     cogs               = gross_revenue * COGS_RATE
     gross_profit       = gross_revenue - cogs
     gross_margin       = (gross_profit / gross_revenue * 100) if gross_revenue > 0 else 0
     total_payroll      = float(employees["monthly_salary"].sum())
-    latest_month       = expenses["month"].max()
-    month_expenses     = expenses[expenses["month"] == latest_month]
-    total_expenses_amt = float(month_expenses["amount"].sum())
+    total_expenses_amt = float(month_expenses_df["amount"].sum())
     total_opex         = total_payroll + total_expenses_amt
     net_profit         = gross_profit - total_opex
     net_margin         = (net_profit / gross_revenue * 100) if gross_revenue > 0 else 0
@@ -612,12 +732,11 @@ elif page == "P&L":
 
         st.markdown("#### Operating Expenses")
         pl_row("Payroll", -total_payroll, indent=True, positive_is_good=False)
-        by_cat = month_expenses.groupby("category")["amount"].sum()
+        by_cat = month_expenses_df.groupby("category")["amount"].sum()
         for cat, amt in by_cat.sort_values(ascending=False).items():
             pl_row(cat, -amt, indent=True, positive_is_good=False)
         pl_row("Total Operating Expenses", -total_opex, bold=True, positive_is_good=False)
         st.markdown("---")
-
         pl_row("Net Profit / Loss", net_profit, bold=True)
         st.markdown(f"*Net Margin: {net_margin:.1f}%*")
 
@@ -642,7 +761,6 @@ elif page == "P&L":
             st.markdown(f"{icon} {check}")
 
     st.divider()
-
     st.subheader("Summary")
     summary = pd.DataFrame([
         {"Line Item": "Gross Revenue",            "Amount (€)": f"€{gross_revenue:,.2f}"},
