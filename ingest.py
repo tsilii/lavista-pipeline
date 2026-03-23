@@ -106,6 +106,17 @@ def init_db(conn) -> None:
                 UNIQUE (description, month)
             );
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS supplier_deliveries (
+                id              SERIAL PRIMARY KEY,
+                supplier_name   TEXT    NOT NULL,
+                delivery_date   DATE    NOT NULL,
+                amount          NUMERIC(10, 2) NOT NULL,
+                description     TEXT,
+                paid            BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
     conn.commit()
 
 
