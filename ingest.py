@@ -3,7 +3,7 @@ Ingestion script — fetch → clean → load into PostgreSQL.
 
 Modes:
   python ingest.py          # run once immediately
-  python ingest.py --schedule  # run every N minutes via APScheduler
+  python ingest.py --schedule  # run on cron during operating hours (08:30-16:30)
 """
 
 import argparse
@@ -19,8 +19,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 # ── Config ────────────────────────────────────────────────────────────────────
 POS_API_URL            = os.getenv("POS_API_URL", "http://127.0.0.1:8000/sales")
-TRANSACTIONS_PER_FETCH = int(os.getenv("TRANSACTIONS_PER_FETCH", "20"))
-SCHEDULE_MINUTES       = int(os.getenv("SCHEDULE_MINUTES", "1"))
+TRANSACTIONS_PER_FETCH = int(os.getenv("TRANSACTIONS_PER_FETCH", "4"))
 DATABASE_URL           = os.getenv("DATABASE_URL")
 
 logging.basicConfig(
@@ -276,9 +275,9 @@ def run_pipeline() -> None:
         conn.close()
         return
 
-    conn = get_connection()
-    new_rows = load_transactions(conn, cleaned)
-    skipped  = len(cleaned) - new_rows
+    conn      = get_connection()
+    new_rows  = load_transactions(conn, cleaned)
+    skipped   = len(cleaned) - new_rows
 
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM transactions")
@@ -297,19 +296,27 @@ def run_pipeline() -> None:
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Lavista ingestion script")
+    parser = argparse.ArgumentParser(description="Sova Bistrot ingestion script")
     parser.add_argument(
         "--schedule",
         action="store_true",
-        help=f"Run every {SCHEDULE_MINUTES} minute(s) via APScheduler",
+        help="Run on cron schedule during operating hours (08:30-16:30 every hour)",
     )
     args = parser.parse_args()
 
     if args.schedule:
-        log.info("Scheduler mode: running every %d minute(s). Press Ctrl+C to stop.", SCHEDULE_MINUTES)
+        log.info("Scheduler mode: running at :30 past each hour from 08:30 to 16:30.")
         scheduler = BlockingScheduler()
-        scheduler.add_job(run_pipeline, "interval", minutes=SCHEDULE_MINUTES)
-        run_pipeline()
+
+        # Fire at 08:30, 09:30, 10:30, 11:30, 12:30, 13:30, 14:30, 15:30, 16:30
+        scheduler.add_job(
+            run_pipeline,
+            "cron",
+            hour="8-16",
+            minute="30",
+        )
+
+        run_pipeline()  # run immediately on start
         try:
             scheduler.start()
         except KeyboardInterrupt:
