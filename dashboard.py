@@ -111,9 +111,7 @@ def load_expenses_data():
     if not conn:
         return None
     try:
-        expenses = pd.read_sql(
-            "SELECT * FROM expenses ORDER BY month DESC, amount DESC", conn
-        )
+        expenses = pd.read_sql("SELECT * FROM expenses ORDER BY month DESC, amount DESC", conn)
         conn.close()
         expenses["month"] = pd.to_datetime(expenses["month"]).dt.date
         return expenses
@@ -122,7 +120,26 @@ def load_expenses_data():
         return None
 
 
-# ── Expense write operations ───────────────────────────────────────────────────
+@st.cache_data(ttl=10)
+def load_supplier_data():
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        deliveries = pd.read_sql(
+            "SELECT * FROM supplier_deliveries ORDER BY delivery_date DESC", conn
+        )
+        conn.close()
+        if not deliveries.empty:
+            deliveries["delivery_date"] = pd.to_datetime(deliveries["delivery_date"]).dt.date
+            deliveries["month"]         = pd.to_datetime(deliveries["delivery_date"]).dt.to_period("M")
+        return deliveries
+    except Exception:
+        conn.close()
+        return None
+
+
+# ── Write operations ───────────────────────────────────────────────────────────
 
 def add_expense(category, description, amount, month):
     conn = get_conn()
@@ -134,8 +151,7 @@ def add_expense(category, description, amount, month):
                 INSERT INTO expenses (category, description, amount, frequency, month)
                 VALUES (%s, %s, %s, 'monthly', %s)
                 ON CONFLICT (description, month) DO UPDATE SET
-                    category = EXCLUDED.category,
-                    amount   = EXCLUDED.amount
+                    category = EXCLUDED.category, amount = EXCLUDED.amount
             """, (category, description, amount, month))
         conn.commit()
         conn.close()
@@ -160,11 +176,59 @@ def delete_expense(expense_id):
         return False, str(e)
 
 
+def add_delivery(supplier_name, delivery_date, amount, description):
+    conn = get_conn()
+    if not conn:
+        return False, "Could not connect to database."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO supplier_deliveries (supplier_name, delivery_date, amount, description)
+                VALUES (%s, %s, %s, %s)
+            """, (supplier_name.strip(), delivery_date, amount, description.strip() or None))
+        conn.commit()
+        conn.close()
+        return True, f"Delivery from '{supplier_name}' on {delivery_date} saved."
+    except Exception as e:
+        conn.close()
+        return False, str(e)
+
+
+def toggle_paid(delivery_id, paid):
+    conn = get_conn()
+    if not conn:
+        return False, "Could not connect to database."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE supplier_deliveries SET paid = %s WHERE id = %s", (paid, delivery_id))
+        conn.commit()
+        conn.close()
+        return True, "Updated."
+    except Exception as e:
+        conn.close()
+        return False, str(e)
+
+
+def delete_delivery(delivery_id):
+    conn = get_conn()
+    if not conn:
+        return False, "Could not connect to database."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM supplier_deliveries WHERE id = %s", (delivery_id,))
+        conn.commit()
+        conn.close()
+        return True, "Delivery deleted."
+    except Exception as e:
+        conn.close()
+        return False, str(e)
+
+
 # ── Navigation ─────────────────────────────────────────────────────────────────
 
 page = st.sidebar.selectbox(
     "Navigation",
-    ["Home", "Sales", "Payroll", "Expenses", "Inventory", "P&L"],
+    ["Home", "Sales", "Payroll", "Expenses", "Suppliers", "Inventory", "P&L"],
     index=0,
 )
 
@@ -184,45 +248,42 @@ if page == "Home":
     with col_logo:
         st.markdown(OWL_SVG, unsafe_allow_html=True)
     with col_title:
-        st.markdown(
-            """
+        st.markdown("""
             <div style='padding-top: 20px;'>
                 <div style='font-size: 42px; font-weight: 700; letter-spacing: 2px;'>SOVA</div>
                 <div style='font-size: 16px; letter-spacing: 6px; color: #8b6914; margin-top: -8px;'>BISTROT</div>
                 <div style='font-size: 15px; color: gray; margin-top: 12px;'>Business Intelligence Dashboard</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+            </div>""", unsafe_allow_html=True)
 
     st.divider()
 
     txn, items, runs = load_sales_data()
     employees        = load_payroll_data()
     expenses         = load_expenses_data()
+    deliveries       = load_supplier_data()
 
     st.subheader("Live Overview")
     k1, k2, k3, k4, k5 = st.columns(5)
 
     if txn is not None and not txn.empty:
-        k1.metric("Total Revenue",   f"€{txn['total'].sum():,.2f}")
-        k2.metric("Transactions",    f"{len(txn):,}")
-        k3.metric("Avg Check",       f"€{txn['total'].mean():.2f}")
+        k1.metric("Total Revenue", f"€{txn['total'].sum():,.2f}")
+        k2.metric("Transactions",  f"{len(txn):,}")
+        k3.metric("Avg Check",     f"€{txn['total'].mean():.2f}")
     else:
-        k1.metric("Total Revenue",   "—")
-        k2.metric("Transactions",    "—")
-        k3.metric("Avg Check",       "—")
+        k1.metric("Total Revenue", "—")
+        k2.metric("Transactions",  "—")
+        k3.metric("Avg Check",     "—")
 
     if employees is not None and not employees.empty:
         k4.metric("Monthly Payroll", f"€{employees['monthly_salary'].sum():,.2f}")
     else:
         k4.metric("Monthly Payroll", "—")
 
-    if expenses is not None and not expenses.empty:
-        latest = expenses["month"].max()
-        k5.metric("Monthly Expenses", f"€{expenses[expenses['month']==latest]['amount'].sum():,.2f}")
+    if deliveries is not None and not deliveries.empty:
+        total_outstanding = float(deliveries[deliveries["paid"] == False]["amount"].sum())
+        k5.metric("Supplier Balance", f"€{total_outstanding:,.2f}", help="Total unpaid supplier deliveries")
     else:
-        k5.metric("Monthly Expenses", "—")
+        k5.metric("Supplier Balance", "—")
 
     st.divider()
     st.subheader("Dashboard Pages")
@@ -230,35 +291,31 @@ if page == "Home":
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("#### 📊 Sales")
-        st.markdown("Revenue by day and hour, top selling items, category breakdown, server performance, payment methods.")
+        st.markdown("Revenue by day and hour, top selling items, category breakdown, server performance.")
     with c2:
         st.markdown("#### 👥 Payroll")
-        st.markdown("Staff overview, salary distribution by role, monthly payroll cost, payroll vs revenue ratio.")
+        st.markdown("Staff overview, salary distribution by role, monthly payroll vs revenue.")
     with c3:
         st.markdown("#### 🧾 Expenses")
-        st.markdown("Monthly costs by category, add/edit/delete expenses directly from the dashboard.")
+        st.markdown("Monthly fixed costs by category, add/edit/delete expenses from the dashboard.")
 
     c4, c5, c6 = st.columns(3)
     with c4:
-        st.markdown("#### 📦 Inventory")
-        st.markdown("Coming soon — stock levels, low stock alerts, waste tracking.")
+        st.markdown("#### 🚚 Suppliers")
+        st.markdown("Delivery log, monthly balance per supplier, carried over unpaid amounts, historical pivot table.")
     with c5:
         st.markdown("#### 📈 P&L")
-        st.markdown("Full profit & loss statement — gross profit, operating expenses, net margin, health checks.")
+        st.markdown("Full profit & loss statement — gross profit, net margin, health checks.")
     with c6:
-        st.markdown("#### ⚙️ Pipeline")
-        st.markdown("Data ingests automatically every minute from the POS system into PostgreSQL via Railway.")
+        st.markdown("#### 📦 Inventory")
+        st.markdown("Coming soon — stock levels, low stock alerts, waste tracking.")
 
     st.divider()
     st.subheader("Pipeline Status")
     if runs is not None and not runs.empty:
         last_run = runs.iloc[0]
         if last_run["status"] == "success":
-            st.success(
-                f"Last ingestion: {last_run['run_at']}  |  "
-                f"Inserted {last_run['inserted']} new rows  |  "
-                f"DB total: {len(txn):,} transactions"
-            )
+            st.success(f"Last ingestion: {last_run['run_at']}  |  Inserted {last_run['inserted']} new rows  |  DB total: {len(txn):,} transactions")
         else:
             st.error(f"Last ingestion FAILED: {last_run['run_at']}  |  {last_run['error_msg']}")
     else:
@@ -271,30 +328,21 @@ if page == "Home":
 
 elif page == "Sales":
     st.title("Sova Bistrot — Sales")
-
     txn, items, runs = load_sales_data()
 
     if txn is None or txn.empty:
-        st.warning("No data yet — make sure DATABASE_URL is set and ingest.py has run.")
+        st.warning("No data yet.")
         st.stop()
 
-    # ── Month selector ─────────────────────────────────────────────────────────
     all_months   = sorted(txn["month"].unique(), reverse=True)
-    month_labels = {m: m.strftime("%B %Y") for m in all_months}
-
-    col_month, col_spacer = st.columns([2, 4])
+    col_month, _ = st.columns([2, 4])
     with col_month:
-        selected_month = st.selectbox(
-            "Viewing month",
-            options=all_months,
-            format_func=lambda m: month_labels[m],
-        )
+        selected_month = st.selectbox("Viewing month", options=all_months,
+                                      format_func=lambda m: m.strftime("%B %Y"))
 
-    # Filter transactions to selected month
     month_txn   = txn[txn["month"] == selected_month]
     month_items = items[items["transaction_id"].isin(month_txn["transaction_id"])]
 
-    # ── Additional sidebar filters ─────────────────────────────────────────────
     with st.sidebar:
         st.header("Filters")
         all_servers = sorted(month_txn["server"].dropna().unique().tolist())
@@ -304,26 +352,18 @@ elif page == "Sales":
         st.divider()
         st.caption("Auto-refreshes every 30 s")
 
-    filtered_txn = month_txn[
-        month_txn["server"].isin(selected_servers)
-        & month_txn["payment_method"].isin(selected_methods)
-    ]
+    filtered_txn   = month_txn[month_txn["server"].isin(selected_servers) & month_txn["payment_method"].isin(selected_methods)]
     filtered_items = month_items[month_items["transaction_id"].isin(filtered_txn["transaction_id"])]
 
     if filtered_txn.empty:
         st.warning("No transactions match the current filters.")
         st.stop()
 
-    total_revenue = filtered_txn["total"].sum()
-    total_txns    = len(filtered_txn)
-    avg_check     = filtered_txn["total"].mean()
-    top_server    = filtered_txn["server"].value_counts().idxmax()
-
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total Revenue", f"€{total_revenue:,.2f}")
-    k2.metric("Transactions",  f"{total_txns:,}")
-    k3.metric("Avg Check",     f"€{avg_check:.2f}")
-    k4.metric("Top Server",    top_server)
+    k1.metric("Total Revenue", f"€{filtered_txn['total'].sum():,.2f}")
+    k2.metric("Transactions",  f"{len(filtered_txn):,}")
+    k3.metric("Avg Check",     f"€{filtered_txn['total'].mean():.2f}")
+    k4.metric("Top Server",    filtered_txn["server"].value_counts().idxmax())
 
     st.divider()
 
@@ -343,18 +383,12 @@ elif page == "Sales":
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Top 10 Items by Revenue")
-        top_items = (
-            filtered_items.groupby("item_name")["subtotal"]
-            .sum().sort_values(ascending=False).head(10).reset_index()
-        )
+        top_items = filtered_items.groupby("item_name")["subtotal"].sum().sort_values(ascending=False).head(10).reset_index()
         top_items.columns = ["Item", "Revenue (€)"]
         st.bar_chart(top_items.set_index("Item"))
     with col_b:
         st.subheader("Revenue by Category")
-        by_cat = (
-            filtered_items.groupby("category")["subtotal"]
-            .sum().sort_values(ascending=False).reset_index()
-        )
+        by_cat = filtered_items.groupby("category")["subtotal"].sum().sort_values(ascending=False).reset_index()
         by_cat.columns = ["Category", "Revenue (€)"]
         st.bar_chart(by_cat.set_index("Category"))
 
@@ -368,43 +402,26 @@ elif page == "Sales":
         st.dataframe(pm, use_container_width=True, hide_index=True)
     with col_s:
         st.subheader("Revenue by Server")
-        by_server = (
-            filtered_txn.groupby("server")["total"]
+        by_server = (filtered_txn.groupby("server")["total"]
             .agg(["sum", "count", "mean"])
             .rename(columns={"sum": "Revenue (€)", "count": "Transactions", "mean": "Avg Check (€)"})
-            .sort_values("Revenue (€)", ascending=False).reset_index()
-        )
+            .sort_values("Revenue (€)", ascending=False).reset_index())
         st.dataframe(by_server, use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader("Pipeline Health")
-    if runs.empty:
-        st.info("No pipeline runs recorded yet.")
-    else:
+    if not runs.empty:
         last_run = runs.iloc[0]
         if last_run["status"] == "success":
-            st.success(
-                f"Last run: {last_run['run_at']}  |  "
-                f"Fetched {last_run['fetched']}  →  "
-                f"Inserted {last_run['inserted']}  |  "
-                f"Skipped {last_run['skipped']} duplicates"
-            )
+            st.success(f"Last run: {last_run['run_at']}  |  Fetched {last_run['fetched']}  →  Inserted {last_run['inserted']}  |  Skipped {last_run['skipped']} duplicates")
         else:
             st.error(f"Last run FAILED: {last_run['run_at']}  |  {last_run['error_msg']}")
         with st.expander("Recent pipeline runs"):
-            display_runs = runs.rename(columns={
-                "run_at": "Run at", "fetched": "Fetched", "cleaned": "Cleaned",
-                "inserted": "Inserted", "skipped": "Skipped",
-                "status": "Status", "error_msg": "Error",
-            })
-            st.dataframe(display_runs.drop(columns=["id"]), use_container_width=True, hide_index=True)
+            st.dataframe(runs.rename(columns={"run_at": "Run at", "fetched": "Fetched", "cleaned": "Cleaned", "inserted": "Inserted", "skipped": "Skipped", "status": "Status", "error_msg": "Error"}).drop(columns=["id"]), use_container_width=True, hide_index=True)
 
     st.divider()
     with st.expander("Raw Transactions"):
-        st.dataframe(
-            filtered_txn.drop(columns=["date", "hour", "month"]).sort_values("timestamp", ascending=False),
-            use_container_width=True, hide_index=True,
-        )
+        st.dataframe(filtered_txn.drop(columns=["date", "hour", "month"]).sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -413,7 +430,6 @@ elif page == "Sales":
 
 elif page == "Payroll":
     st.title("Sova Bistrot — Payroll")
-
     employees = load_payroll_data()
     txn, _, _ = load_sales_data()
 
@@ -421,64 +437,48 @@ elif page == "Payroll":
         st.warning("No employee data found. Run `python seed_employees.py` first.")
         st.stop()
 
-    # ── Month selector ─────────────────────────────────────────────────────────
     if txn is not None and not txn.empty:
         all_months   = sorted(txn["month"].unique(), reverse=True)
-        col_month, col_spacer = st.columns([2, 4])
+        col_month, _ = st.columns([2, 4])
         with col_month:
-            selected_month = st.selectbox(
-                "Viewing month",
-                options=all_months,
-                format_func=lambda m: m.strftime("%B %Y"),
-            )
-        month_txn     = txn[txn["month"] == selected_month]
-        month_revenue = float(month_txn["total"].sum())
+            selected_month = st.selectbox("Viewing month", options=all_months, format_func=lambda m: m.strftime("%B %Y"))
+        month_revenue = float(txn[txn["month"] == selected_month]["total"].sum())
     else:
         selected_month = None
         month_revenue  = 0.0
 
     total_payroll = employees["monthly_salary"].sum()
-    total_staff   = len(employees)
-    avg_salary    = employees["monthly_salary"].mean()
-    annual_cost   = total_payroll * 12
-
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Monthly Payroll", f"€{total_payroll:,.2f}")
-    k2.metric("Total Staff",     f"{total_staff}")
-    k3.metric("Average Salary",  f"€{avg_salary:,.2f}")
-    k4.metric("Annual Cost",     f"€{annual_cost:,.2f}")
+    k2.metric("Total Staff",     f"{len(employees)}")
+    k3.metric("Average Salary",  f"€{employees['monthly_salary'].mean():,.2f}")
+    k4.metric("Annual Cost",     f"€{total_payroll * 12:,.2f}")
 
     st.divider()
 
     col_left, col_right = st.columns(2)
     with col_left:
         st.subheader("Monthly Cost by Role")
-        by_role = (
-            employees.groupby("role")["monthly_salary"]
-            .sum().sort_values(ascending=False).reset_index()
-        )
+        by_role = employees.groupby("role")["monthly_salary"].sum().sort_values(ascending=False).reset_index()
         by_role.columns = ["Role", "Monthly Cost (€)"]
         st.bar_chart(by_role.set_index("Role"))
     with col_right:
         st.subheader("Salary Distribution")
-        by_employee = employees[["name", "monthly_salary"]].copy()
-        by_employee.columns = ["Employee", "Monthly Salary (€)"]
-        st.bar_chart(by_employee.set_index("Employee"))
+        by_emp = employees[["name", "monthly_salary"]].copy()
+        by_emp.columns = ["Employee", "Monthly Salary (€)"]
+        st.bar_chart(by_emp.set_index("Employee"))
 
     st.divider()
     st.subheader("Staff Overview")
-    display_employees = employees[["name", "role", "monthly_salary", "start_date"]].copy()
-    display_employees.columns = ["Name", "Role", "Monthly Salary (€)", "Start Date"]
-    display_employees["Monthly Salary (€)"] = display_employees["Monthly Salary (€)"].apply(
-        lambda x: f"€{x:,.2f}"
-    )
-    st.dataframe(display_employees, use_container_width=True, hide_index=True)
+    disp = employees[["name", "role", "monthly_salary", "start_date"]].copy()
+    disp.columns = ["Name", "Role", "Monthly Salary (€)", "Start Date"]
+    disp["Monthly Salary (€)"] = disp["Monthly Salary (€)"].apply(lambda x: f"€{x:,.2f}")
+    st.dataframe(disp, use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader(f"Payroll vs Revenue — {selected_month.strftime('%B %Y') if selected_month else ''}")
-
     if month_revenue > 0:
-        payroll_ratio = (float(total_payroll) / month_revenue * 100)
+        payroll_ratio = float(total_payroll) / month_revenue * 100
         col_a, col_b, col_c = st.columns(3)
         col_a.metric(f"Revenue ({selected_month.strftime('%B %Y')})", f"€{month_revenue:,.2f}")
         col_b.metric("Monthly Payroll",   f"€{total_payroll:,.2f}")
@@ -488,7 +488,7 @@ elif page == "Payroll":
         else:
             st.success("Payroll is within the healthy industry benchmark of 25–35% of revenue.")
     else:
-        st.info("No sales data available for the selected month.")
+        st.info("No sales data for the selected month.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -497,73 +497,53 @@ elif page == "Payroll":
 
 elif page == "Expenses":
     st.title("Sova Bistrot — Expenses")
-
     expenses = load_expenses_data()
 
     if expenses is None or expenses.empty:
         st.warning("No expenses found. Add your first expense below.")
     else:
-        all_months = sorted(expenses["month"].unique(), reverse=True)
-        selected_month = st.selectbox(
-            "Viewing month",
-            options=all_months,
-            format_func=lambda d: d.strftime("%B %Y"),
-        )
-
+        all_months     = sorted(expenses["month"].unique(), reverse=True)
+        selected_month = st.selectbox("Viewing month", options=all_months, format_func=lambda d: d.strftime("%B %Y"))
         month_expenses = expenses[expenses["month"] == selected_month]
 
         if not month_expenses.empty:
-            total_expenses  = month_expenses["amount"].sum()
-            top_category    = month_expenses.groupby("category")["amount"].sum().idxmax()
-            top_cat_amount  = month_expenses.groupby("category")["amount"].sum().max()
-            num_categories  = month_expenses["category"].nunique()
-
+            total_expenses = month_expenses["amount"].sum()
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Monthly Expenses",  f"€{total_expenses:,.2f}")
-            k2.metric("Biggest Category",  top_category)
-            k3.metric("Category Amount",   f"€{top_cat_amount:,.2f}")
-            k4.metric("Categories",        f"{num_categories}")
+            k2.metric("Biggest Category",  month_expenses.groupby("category")["amount"].sum().idxmax())
+            k3.metric("Category Amount",   f"€{month_expenses.groupby('category')['amount'].sum().max():,.2f}")
+            k4.metric("Categories",        f"{month_expenses['category'].nunique()}")
 
             st.divider()
-
             col_left, col_right = st.columns(2)
             with col_left:
                 st.subheader("Expenses by Category")
-                by_cat = (
-                    month_expenses.groupby("category")["amount"]
-                    .sum().sort_values(ascending=False).reset_index()
-                )
+                by_cat = month_expenses.groupby("category")["amount"].sum().sort_values(ascending=False).reset_index()
                 by_cat.columns = ["Category", "Amount (€)"]
                 st.bar_chart(by_cat.set_index("Category"))
             with col_right:
                 st.subheader("Expense Breakdown")
-                display_exp = month_expenses[["id", "category", "description", "amount"]].copy()
-                display_exp["amount"] = display_exp["amount"].apply(lambda x: f"€{x:,.2f}")
-                display_exp.columns = ["ID", "Category", "Description", "Amount (€)"]
-                st.dataframe(display_exp, use_container_width=True, hide_index=True)
+                disp = month_expenses[["id", "category", "description", "amount"]].copy()
+                disp["amount"] = disp["amount"].apply(lambda x: f"€{x:,.2f}")
+                disp.columns = ["ID", "Category", "Description", "Amount (€)"]
+                st.dataframe(disp, use_container_width=True, hide_index=True)
 
             st.divider()
-
             st.subheader("Expenses vs Revenue")
             txn, _, _ = load_sales_data()
             if txn is not None and not txn.empty:
-                import pandas as pd
-                selected_period = pd.Period(selected_month.strftime("%Y-%m"), "M")
-                month_txn      = txn[txn["month"] == selected_period]
-                month_revenue  = float(month_txn["total"].sum())
-
+                sel_period    = pd.Period(selected_month.strftime("%Y-%m"), "M")
+                month_revenue = float(txn[txn["month"] == sel_period]["total"].sum())
                 if month_revenue > 0:
-                    expenses_ratio = float(total_expenses) / month_revenue * 100
+                    ratio = float(total_expenses) / month_revenue * 100
                     col_a, col_b, col_c = st.columns(3)
                     col_a.metric(f"Revenue ({selected_month.strftime('%B %Y')})", f"€{month_revenue:,.2f}")
-                    col_b.metric("Monthly Expenses",    f"€{total_expenses:,.2f}")
-                    col_c.metric("Expenses / Revenue",  f"{expenses_ratio:.1f}%")
-                    if expenses_ratio > 30:
+                    col_b.metric("Monthly Expenses",   f"€{total_expenses:,.2f}")
+                    col_c.metric("Expenses / Revenue", f"{ratio:.1f}%")
+                    if ratio > 30:
                         st.warning("Expenses are above 30% of revenue — review costs.")
                     else:
                         st.success("Expenses are within a healthy range.")
-                else:
-                    st.info("No sales data for this month.")
 
             if len(all_months) > 1:
                 st.divider()
@@ -574,12 +554,9 @@ elif page == "Expenses":
 
     st.divider()
     st.subheader("Manage Expenses")
-
     tab_add, tab_delete = st.tabs(["Add / Update", "Delete"])
 
     with tab_add:
-        st.markdown("Add a new expense or update an existing one. If the same description already exists for the selected month, the amount will be updated.")
-
         col1, col2 = st.columns(2)
         with col1:
             form_month       = st.date_input("Month", value=date.today().replace(day=1))
@@ -587,8 +564,7 @@ elif page == "Expenses":
             form_description = st.text_input("Description", placeholder="e.g. Electricity bill March")
         with col2:
             form_amount = st.number_input("Amount (€)", min_value=0.0, step=10.0, format="%.2f")
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("<br><br>", unsafe_allow_html=True)
             submit = st.button("Save Expense", type="primary", use_container_width=True)
 
         if submit:
@@ -597,8 +573,7 @@ elif page == "Expenses":
             elif form_amount <= 0:
                 st.error("Amount must be greater than zero.")
             else:
-                month_first = form_month.replace(day=1)
-                success, message = add_expense(form_category, form_description.strip(), form_amount, month_first)
+                success, message = add_expense(form_category, form_description.strip(), form_amount, form_month.replace(day=1))
                 if success:
                     st.success(message)
                     st.cache_data.clear()
@@ -611,22 +586,213 @@ elif page == "Expenses":
         if expenses_fresh is None or expenses_fresh.empty:
             st.info("No expenses to delete.")
         else:
-            st.markdown("Select an expense to delete. This cannot be undone.")
-            options = {
-                f"[{row['id']}] {row['description']} — {row['month'].strftime('%B %Y')} — €{row['amount']:,.2f}": row["id"]
-                for _, row in expenses_fresh.iterrows()
-            }
+            options = {f"[{r['id']}] {r['description']} — {r['month'].strftime('%B %Y')} — €{r['amount']:,.2f}": r["id"] for _, r in expenses_fresh.iterrows()}
             selected_label = st.selectbox("Select expense to delete", options=list(options.keys()))
-            selected_id    = options[selected_label]
-
             if st.button("Delete Expense", type="primary", use_container_width=True):
-                success, message = delete_expense(selected_id)
+                success, message = delete_expense(options[selected_label])
                 if success:
                     st.success(message)
                     st.cache_data.clear()
                     st.rerun()
                 else:
                     st.error(f"Error: {message}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: SUPPLIERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Suppliers":
+    st.title("Sova Bistrot — Suppliers")
+
+    deliveries = load_supplier_data()
+
+    if deliveries is not None and not deliveries.empty:
+
+        # ── Month selector ─────────────────────────────────────────────────────
+        all_months     = sorted(deliveries["month"].unique(), reverse=True)
+        col_month, _   = st.columns([2, 4])
+        with col_month:
+            selected_month = st.selectbox(
+                "Viewing month", options=all_months,
+                format_func=lambda m: m.strftime("%B %Y")
+            )
+
+        # Split deliveries: this month vs previous months
+        month_del = deliveries[deliveries["month"] == selected_month]
+        prev_del  = deliveries[deliveries["month"] < selected_month]
+
+        # ── KPIs ───────────────────────────────────────────────────────────────
+        total_ordered      = float(month_del["amount"].sum())
+        total_paid_month   = float(month_del[month_del["paid"] == True]["amount"].sum())
+        total_owed_month   = total_ordered - total_paid_month
+        total_carried_over = float(prev_del[prev_del["paid"] == False]["amount"].sum()) if not prev_del.empty else 0.0
+        total_outstanding  = total_owed_month + total_carried_over
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("This Month Ordered",  f"€{total_ordered:,.2f}")
+        k2.metric("Paid This Month",     f"€{total_paid_month:,.2f}")
+        k3.metric("This Month Owed",     f"€{total_owed_month:,.2f}")
+        k4.metric("Carried Over",        f"€{total_carried_over:,.2f}",
+                  help="Unpaid amounts from previous months")
+        k5.metric("Total Outstanding",   f"€{total_outstanding:,.2f}",
+                  help="This month owed + carried over from previous months")
+
+        st.divider()
+
+        # ── Monthly summary per supplier ───────────────────────────────────────
+        st.subheader(f"Supplier Balance — {selected_month.strftime('%B %Y')}")
+        st.caption("Carried Over = unpaid deliveries from all previous months per supplier")
+
+        all_suppliers = deliveries["supplier_name"].unique()
+        summary_rows  = []
+
+        for supplier in sorted(all_suppliers):
+            sup_month = month_del[month_del["supplier_name"] == supplier]
+            sup_prev  = prev_del[prev_del["supplier_name"] == supplier] if not prev_del.empty else pd.DataFrame()
+
+            this_ordered    = float(sup_month["amount"].sum())
+            this_paid       = float(sup_month[sup_month["paid"] == True]["amount"].sum()) if not sup_month.empty else 0.0
+            this_owed       = this_ordered - this_paid
+            carried         = float(sup_prev[sup_prev["paid"] == False]["amount"].sum()) if not sup_prev.empty else 0.0
+            total_owed_sup  = this_owed + carried
+            deliveries_count= len(sup_month)
+
+            if this_ordered > 0 or carried > 0:
+                summary_rows.append({
+                    "Supplier":            supplier,
+                    "Deliveries":          deliveries_count,
+                    "Monthly Total (€)":   f"€{this_ordered:,.2f}",
+                    "Paid (€)":            f"€{this_paid:,.2f}",
+                    "This Month Owed (€)": f"€{this_owed:,.2f}",
+                    "Carried Over (€)":    f"€{carried:,.2f}",
+                    "Total Outstanding (€)": f"€{total_owed_sup:,.2f}",
+                })
+
+        if summary_rows:
+            summary_df = pd.DataFrame(summary_rows)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # ── Delivery log with monthly running total ────────────────────────────
+        st.subheader(f"Delivery Log — {selected_month.strftime('%B %Y')}")
+
+        if month_del.empty:
+            st.info("No deliveries recorded for this month.")
+        else:
+            # Show per supplier with running total
+            for supplier in sorted(month_del["supplier_name"].unique()):
+                sup_del = month_del[month_del["supplier_name"] == supplier].sort_values("delivery_date")
+                sup_total = float(sup_del["amount"].sum())
+                sup_paid  = float(sup_del[sup_del["paid"] == True]["amount"].sum())
+                sup_owed  = sup_total - sup_paid
+
+                with st.expander(
+                    f"**{supplier}** — {len(sup_del)} deliveries — "
+                    f"Monthly total: €{sup_total:,.2f} — "
+                    f"Owed: €{sup_owed:,.2f}",
+                    expanded=True
+                ):
+                    # Header row
+                    h1, h2, h3, h4, h5 = st.columns([1.5, 3, 1.5, 1.2, 0.5])
+                    h1.markdown("**Date**")
+                    h2.markdown("**Description**")
+                    h3.markdown("**Amount**")
+                    h4.markdown("**Paid**")
+                    h5.markdown("**Del**")
+
+                    running_total = 0.0
+                    for _, row in sup_del.iterrows():
+                        running_total += float(row["amount"])
+                        c1, c2, c3, c4, c5 = st.columns([1.5, 3, 1.5, 1.2, 0.5])
+                        c1.write(str(row["delivery_date"]))
+                        c2.write(row["description"] or "—")
+                        c3.write(f"€{row['amount']:,.2f}")
+
+                        paid_toggle = c4.checkbox(
+                            "Paid", value=bool(row["paid"]),
+                            key=f"paid_{row['id']}"
+                        )
+                        if paid_toggle != bool(row["paid"]):
+                            success, _ = toggle_paid(row["id"], paid_toggle)
+                            if success:
+                                st.cache_data.clear()
+                                st.rerun()
+
+                        if c5.button("🗑", key=f"del_{row['id']}"):
+                            success, message = delete_delivery(row["id"])
+                            if success:
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error(message)
+
+                    # Monthly total footer
+                    st.markdown("---")
+                    f1, f2, f3 = st.columns([4.5, 1.5, 1.2])
+                    f1.markdown(f"**Monthly total for {supplier}**")
+                    f2.markdown(f"**€{sup_total:,.2f}**")
+                    f3.markdown(f"**Owed: €{sup_owed:,.2f}**")
+
+        st.divider()
+
+        # ── Historical pivot table ─────────────────────────────────────────────
+        st.subheader("Supplier Expenses — All Months")
+        st.caption("Total deliveries per supplier per month (€) — all time")
+
+        pivot = deliveries.copy()
+        pivot["month_label"] = pivot["month"].apply(lambda m: m.strftime("%b %Y"))
+        pivot_table = pivot.pivot_table(
+            index="supplier_name",
+            columns="month_label",
+            values="amount",
+            aggfunc="sum",
+            fill_value=0,
+        )
+
+        month_order = sorted(pivot["month"].unique())
+        col_order   = [m.strftime("%b %Y") for m in month_order]
+        pivot_table = pivot_table.reindex(columns=col_order, fill_value=0)
+        pivot_table["Total"] = pivot_table.sum(axis=1)
+
+        total_row      = pivot_table.sum(axis=0)
+        total_row.name = "TOTAL"
+        pivot_table    = pd.concat([pivot_table, total_row.to_frame().T])
+
+        formatted = pivot_table.map(lambda x: f"€{x:,.2f}" if x > 0 else "—")
+        formatted.index.name = "Supplier"
+        st.dataframe(formatted, use_container_width=True)
+
+    else:
+        st.info("No deliveries recorded yet. Add your first delivery below.")
+
+    st.divider()
+
+    # ── Add delivery form ──────────────────────────────────────────────────────
+    st.subheader("Add Delivery")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        sup_name   = st.text_input("Supplier name", placeholder="e.g. Metro Cash & Carry")
+        del_date   = st.date_input("Delivery date", value=date.today())
+    with col2:
+        del_amount = st.number_input("Amount (€)", min_value=0.0, step=10.0, format="%.2f")
+        del_desc   = st.text_input("Description (optional)", placeholder="e.g. Weekly produce order")
+
+    if st.button("Save Delivery", type="primary"):
+        if not sup_name.strip():
+            st.error("Please enter a supplier name.")
+        elif del_amount <= 0:
+            st.error("Amount must be greater than zero.")
+        else:
+            success, message = add_delivery(sup_name, del_date, del_amount, del_desc)
+            if success:
+                st.success(message)
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"Error: {message}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -646,10 +812,9 @@ elif page == "P&L":
     st.title("Sova Bistrot — Profit & Loss")
 
     COGS_RATE = 0.30
-
-    txn, _, _  = load_sales_data()
-    employees  = load_payroll_data()
-    expenses   = load_expenses_data()
+    txn, _, _ = load_sales_data()
+    employees = load_payroll_data()
+    expenses  = load_expenses_data()
 
     if txn is None or txn.empty:
         st.warning("No sales data found.")
@@ -661,25 +826,18 @@ elif page == "P&L":
         st.warning("No expenses data found. Add expenses in the Expenses page.")
         st.stop()
 
-    # Month selector — intersection of sales months and expense months
-    import pandas as pd
     sales_months   = set(txn["month"].unique())
-    expense_months = set(
-        pd.Period(d.strftime("%Y-%m"), "M") for d in expenses["month"].unique()
-    )
+    expense_months = set(pd.Period(d.strftime("%Y-%m"), "M") for d in expenses["month"].unique())
     common_months  = sorted(sales_months & expense_months, reverse=True)
 
     if not common_months:
         st.warning("No months have both sales and expenses data yet.")
         st.stop()
 
-    col_month, col_spacer = st.columns([2, 4])
+    col_month, _ = st.columns([2, 4])
     with col_month:
-        selected_month = st.selectbox(
-            "P&L for month",
-            options=common_months,
-            format_func=lambda m: m.strftime("%B %Y"),
-        )
+        selected_month = st.selectbox("P&L for month", options=common_months,
+                                      format_func=lambda m: m.strftime("%B %Y"))
 
     month_txn          = txn[txn["month"] == selected_month]
     expense_date       = date(selected_month.year, selected_month.month, 1)
@@ -722,18 +880,15 @@ elif page == "P&L":
         st.markdown("#### Revenue")
         pl_row("Total Sales", gross_revenue, bold=True)
         st.markdown("---")
-
         st.markdown("#### Cost of Goods Sold")
         pl_row("Food & Beverage Cost (est. 30%)", -cogs, indent=True, positive_is_good=False)
-        st.caption("COGS estimated at industry standard 30% — not tracked directly")
+        st.caption("COGS estimated at industry standard 30%")
         pl_row("Gross Profit", gross_profit, bold=True)
         st.markdown(f"*Gross Margin: {gross_margin:.1f}%*")
         st.markdown("---")
-
         st.markdown("#### Operating Expenses")
         pl_row("Payroll", -total_payroll, indent=True, positive_is_good=False)
-        by_cat = month_expenses_df.groupby("category")["amount"].sum()
-        for cat, amt in by_cat.sort_values(ascending=False).items():
+        for cat, amt in month_expenses_df.groupby("category")["amount"].sum().sort_values(ascending=False).items():
             pl_row(cat, -amt, indent=True, positive_is_good=False)
         pl_row("Total Operating Expenses", -total_opex, bold=True, positive_is_good=False)
         st.markdown("---")
@@ -742,12 +897,8 @@ elif page == "P&L":
 
     with col_right:
         st.subheader("Cost Breakdown")
-        breakdown = pd.DataFrame({
-            "Category": ["COGS", "Payroll", "Expenses"],
-            "Amount (€)": [cogs, total_payroll, total_expenses_amt]
-        })
+        breakdown = pd.DataFrame({"Category": ["COGS", "Payroll", "Expenses"], "Amount (€)": [cogs, total_payroll, total_expenses_amt]})
         st.bar_chart(breakdown.set_index("Category"))
-
         st.divider()
         st.subheader("Health Check")
         checks = [
@@ -757,17 +908,15 @@ elif page == "P&L":
             ("Net profit positive",    net_profit > 0),
         ]
         for check, passed in checks:
-            icon = "✅" if passed else "❌"
-            st.markdown(f"{icon} {check}")
+            st.markdown(f"{'✅' if passed else '❌'} {check}")
 
     st.divider()
     st.subheader("Summary")
-    summary = pd.DataFrame([
+    st.dataframe(pd.DataFrame([
         {"Line Item": "Gross Revenue",            "Amount (€)": f"€{gross_revenue:,.2f}"},
         {"Line Item": "Cost of Goods Sold (30%)", "Amount (€)": f"-€{cogs:,.2f}"},
         {"Line Item": "Gross Profit",             "Amount (€)": f"€{gross_profit:,.2f}"},
         {"Line Item": "Payroll",                  "Amount (€)": f"-€{total_payroll:,.2f}"},
         {"Line Item": "Operating Expenses",       "Amount (€)": f"-€{total_expenses_amt:,.2f}"},
         {"Line Item": "Net Profit / Loss",        "Amount (€)": f"€{net_profit:,.2f}"},
-    ])
-    st.dataframe(summary, use_container_width=True, hide_index=True)
+    ]), use_container_width=True, hide_index=True)
