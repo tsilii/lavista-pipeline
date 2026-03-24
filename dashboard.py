@@ -75,18 +75,22 @@ def load_sales_data():
     conn = get_conn()
     if not conn:
         return None, None, None
-    txn   = pd.read_sql("SELECT * FROM transactions ORDER BY timestamp DESC", conn)
-    items = pd.read_sql("SELECT * FROM transaction_items", conn)
     try:
-        runs = pd.read_sql("SELECT * FROM pipeline_runs ORDER BY run_at DESC LIMIT 20", conn)
+        txn   = pd.read_sql("SELECT * FROM transactions ORDER BY timestamp DESC", conn)
+        items = pd.read_sql("SELECT * FROM transaction_items", conn)
+        try:
+            runs = pd.read_sql("SELECT * FROM pipeline_runs ORDER BY run_at DESC LIMIT 20", conn)
+        except Exception:
+            runs = pd.DataFrame()
+        txn["timestamp"] = pd.to_datetime(txn["timestamp"], utc=True)
+        txn["date"]      = txn["timestamp"].dt.date
+        txn["hour"]      = txn["timestamp"].dt.hour
+        txn["month"]     = txn["timestamp"].dt.to_period("M")
+        return txn, items, runs
     except Exception:
-        runs = pd.DataFrame()
-    conn.close()
-    txn["timestamp"] = pd.to_datetime(txn["timestamp"], utc=True)
-    txn["date"]      = txn["timestamp"].dt.date
-    txn["hour"]      = txn["timestamp"].dt.hour
-    txn["month"]     = txn["timestamp"].dt.to_period("M")
-    return txn, items, runs
+        return None, None, None
+    finally:
+        conn.close()
 
 
 @st.cache_data(ttl=60)
@@ -95,14 +99,13 @@ def load_payroll_data():
     if not conn:
         return None
     try:
-        employees = pd.read_sql(
+        return pd.read_sql(
             "SELECT * FROM employees WHERE active = TRUE ORDER BY monthly_salary DESC", conn
         )
-        conn.close()
-        return employees
     except Exception:
-        conn.close()
         return None
+    finally:
+        conn.close()
 
 
 @st.cache_data(ttl=10)
@@ -112,12 +115,12 @@ def load_expenses_data():
         return None
     try:
         expenses = pd.read_sql("SELECT * FROM expenses ORDER BY month DESC, amount DESC", conn)
-        conn.close()
         expenses["month"] = pd.to_datetime(expenses["month"]).dt.date
         return expenses
     except Exception:
-        conn.close()
         return None
+    finally:
+        conn.close()
 
 
 @st.cache_data(ttl=10)
@@ -129,14 +132,14 @@ def load_supplier_data():
         deliveries = pd.read_sql(
             "SELECT * FROM supplier_deliveries ORDER BY delivery_date DESC", conn
         )
-        conn.close()
         if not deliveries.empty:
             deliveries["delivery_date"] = pd.to_datetime(deliveries["delivery_date"]).dt.date
             deliveries["month"]         = pd.to_datetime(deliveries["delivery_date"]).dt.to_period("M")
         return deliveries
     except Exception:
-        conn.close()
         return None
+    finally:
+        conn.close()
 
 
 # ── Write operations ───────────────────────────────────────────────────────────
@@ -154,11 +157,12 @@ def add_expense(category, description, amount, month):
                     category = EXCLUDED.category, amount = EXCLUDED.amount
             """, (category, description, amount, month))
         conn.commit()
-        conn.close()
         return True, f"Expense '{description}' saved for {month.strftime('%B %Y')}."
     except Exception as e:
-        conn.close()
+        conn.rollback()
         return False, str(e)
+    finally:
+        conn.close()
 
 
 def delete_expense(expense_id):
@@ -169,11 +173,12 @@ def delete_expense(expense_id):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
         conn.commit()
-        conn.close()
         return True, "Expense deleted."
     except Exception as e:
-        conn.close()
+        conn.rollback()
         return False, str(e)
+    finally:
+        conn.close()
 
 
 def add_delivery(supplier_name, delivery_date, amount, description):
@@ -187,11 +192,12 @@ def add_delivery(supplier_name, delivery_date, amount, description):
                 VALUES (%s, %s, %s, %s)
             """, (supplier_name.strip(), delivery_date, amount, description.strip() or None))
         conn.commit()
-        conn.close()
         return True, f"Delivery from '{supplier_name}' on {delivery_date} saved."
     except Exception as e:
-        conn.close()
+        conn.rollback()
         return False, str(e)
+    finally:
+        conn.close()
 
 
 def toggle_paid(delivery_id, paid):
@@ -200,13 +206,17 @@ def toggle_paid(delivery_id, paid):
         return False, "Could not connect to database."
     try:
         with conn.cursor() as cur:
-            cur.execute("UPDATE supplier_deliveries SET paid = %s WHERE id = %s", (paid, delivery_id))
+            cur.execute(
+                "UPDATE supplier_deliveries SET paid = %s WHERE id = %s",
+                (paid, delivery_id)
+            )
         conn.commit()
-        conn.close()
         return True, "Updated."
     except Exception as e:
-        conn.close()
+        conn.rollback()
         return False, str(e)
+    finally:
+        conn.close()
 
 
 def delete_delivery(delivery_id):
@@ -217,11 +227,12 @@ def delete_delivery(delivery_id):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM supplier_deliveries WHERE id = %s", (delivery_id,))
         conn.commit()
-        conn.close()
         return True, "Delivery deleted."
     except Exception as e:
-        conn.close()
+        conn.rollback()
         return False, str(e)
+    finally:
+        conn.close()
 
 
 # ── Navigation ─────────────────────────────────────────────────────────────────
