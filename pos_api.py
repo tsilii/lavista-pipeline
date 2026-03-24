@@ -83,7 +83,7 @@ def generate_transaction(spread_history: bool = True) -> dict:
     """Generate one realistic sales transaction."""
     # Pick date — spread across last 30 days or use today
     if spread_history:
-        tx_date = random_past_date(30)
+        tx_date = random_past_date(90)
     else:
         tx_date = datetime.now().date()
 
