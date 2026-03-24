@@ -9,6 +9,7 @@ import pandas as pd
 import psycopg2
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -952,3 +953,92 @@ elif page == "P&L":
         {"Line Item": "Operating Expenses",       "Amount (€)": f"-€{total_expenses_amt:,.2f}"},
         {"Line Item": "Net Profit / Loss",        "Amount (€)": f"€{net_profit:,.2f}"},
     ]), use_container_width=True, hide_index=True)
+
+    # ── Cumulative P&L chart ───────────────────────────────────────────────────
+
+st.divider()
+st.subheader("Monthly Performance & Road to Profitability")
+st.caption("Bars show monthly net profit/loss. Line shows cumulative position.")
+
+
+
+# Build monthly P&L across all available months
+pl_rows = []
+for m in sorted(common_months):
+    m_txn      = txn[txn["month"] == m]
+    m_exp_date = date(m.year, m.month, 1)
+    m_exp      = expenses[expenses["month"] == m_exp_date]
+
+    if m_txn.empty or m_exp.empty:
+        continue
+
+    m_revenue  = float(m_txn["total"].sum())
+    m_cogs     = m_revenue * COGS_RATE
+    m_gp       = m_revenue - m_cogs
+    m_opex     = float(employees["monthly_salary"].sum()) + float(m_exp["amount"].sum())
+    m_net      = m_gp - m_opex
+
+    pl_rows.append({
+        "month":      m.strftime("%B %Y"),
+        "net_profit": m_net,
+    })
+
+if len(pl_rows) > 0:
+    pl_df = pd.DataFrame(pl_rows)
+    pl_df["cumulative"] = pl_df["net_profit"].cumsum()
+
+    bar_colors = ["#1a6b3a" if v >= 0 else "#a32d2d" for v in pl_df["net_profit"]]
+
+    fig = go.Figure()
+
+    # Monthly bars
+    fig.add_trace(go.Bar(
+        x=pl_df["month"],
+        y=pl_df["net_profit"],
+        name="Monthly Net Profit/Loss",
+        marker_color=bar_colors,
+        hovertemplate="<b>%{x}</b><br>Monthly: €%{y:,.2f}<extra></extra>",
+    ))
+
+    # Cumulative line
+    fig.add_trace(go.Scatter(
+        x=pl_df["month"],
+        y=pl_df["cumulative"],
+        name="Cumulative P&L",
+        mode="lines+markers",
+        line=dict(color="#e8b84b", width=2.5),
+        marker=dict(size=8),
+        hovertemplate="<b>%{x}</b><br>Cumulative: €%{y:,.2f}<extra></extra>",
+    ))
+
+    # Break-even line
+    fig.add_hline(
+        y=0,
+        line_dash="dash",
+        line_color="#888888",
+        line_width=1,
+        annotation_text="Break-even",
+        annotation_position="bottom right",
+    )
+
+    fig.update_layout(
+        barmode="relative",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font_color="#cccccc",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis_title=None,
+        yaxis_title="€",
+        hovermode="x unified",
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Current cumulative state
+    final_cumulative = pl_df["cumulative"].iloc[-1]
+    if final_cumulative >= 0:
+        st.success(f"Cumulative position: **+€{final_cumulative:,.2f}** — the restaurant is in the black.")
+    else:
+        st.warning(f"Cumulative position: **-€{abs(final_cumulative):,.2f}** — still recovering initial losses.")
+else:
+    st.info("Need at least one month of complete data to show P&L trend.")
