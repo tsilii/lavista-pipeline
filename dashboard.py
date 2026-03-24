@@ -325,24 +325,27 @@ if page == "Home":
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: SALES
 # ══════════════════════════════════════════════════════════════════════════════
-
+ 
 elif page == "Sales":
+    import plotly.express as px
+    import plotly.graph_objects as go
+ 
     st.title("Sova Bistrot — Sales")
     txn, items, runs = load_sales_data()
-
+ 
     if txn is None or txn.empty:
         st.warning("No data yet.")
         st.stop()
-
+ 
     all_months   = sorted(txn["month"].unique(), reverse=True)
     col_month, _ = st.columns([2, 4])
     with col_month:
         selected_month = st.selectbox("Viewing month", options=all_months,
                                       format_func=lambda m: m.strftime("%B %Y"))
-
+ 
     month_txn   = txn[txn["month"] == selected_month]
     month_items = items[items["transaction_id"].isin(month_txn["transaction_id"])]
-
+ 
     with st.sidebar:
         st.header("Filters")
         all_servers = sorted(month_txn["server"].dropna().unique().tolist())
@@ -351,63 +354,181 @@ elif page == "Sales":
         selected_methods = st.multiselect("Payment methods", options=all_methods, default=all_methods)
         st.divider()
         st.caption("Auto-refreshes every 30 s")
-
+ 
     filtered_txn   = month_txn[month_txn["server"].isin(selected_servers) & month_txn["payment_method"].isin(selected_methods)]
     filtered_items = month_items[month_items["transaction_id"].isin(filtered_txn["transaction_id"])]
-
+ 
     if filtered_txn.empty:
         st.warning("No transactions match the current filters.")
         st.stop()
-
+ 
+    # ── KPIs with month-over-month deltas ─────────────────────────────────────
+    all_months_sorted = sorted(txn["month"].unique())
+    current_idx       = list(all_months_sorted).index(selected_month)
+    prev_month        = all_months_sorted[current_idx - 1] if current_idx > 0 else None
+    prev_txn          = txn[txn["month"] == prev_month] if prev_month is not None else pd.DataFrame()
+ 
+    curr_revenue = float(filtered_txn["total"].sum())
+    curr_txns    = len(filtered_txn)
+    curr_avg     = float(filtered_txn["total"].mean())
+    top_server   = filtered_txn["server"].value_counts().idxmax()
+ 
+    prev_revenue = float(prev_txn["total"].sum())    if not prev_txn.empty else None
+    prev_txns    = len(prev_txn)                     if not prev_txn.empty else None
+    prev_avg     = float(prev_txn["total"].mean())   if not prev_txn.empty else None
+ 
+    def pct_delta(curr, prev):
+        if prev is None or prev == 0:
+            return None
+        return f"{((curr - prev) / prev * 100):+.1f}%"
+ 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total Revenue", f"€{filtered_txn['total'].sum():,.2f}")
-    k2.metric("Transactions",  f"{len(filtered_txn):,}")
-    k3.metric("Avg Check",     f"€{filtered_txn['total'].mean():.2f}")
-    k4.metric("Top Server",    filtered_txn["server"].value_counts().idxmax())
-
+    k1.metric("Total Revenue", f"€{curr_revenue:,.2f}",
+              delta=pct_delta(curr_revenue, prev_revenue),
+              delta_color="normal")
+    k2.metric("Transactions",  f"{curr_txns:,}",
+              delta=f"{curr_txns - prev_txns:+,} vs prev month" if prev_txns is not None else None,
+              delta_color="normal")
+    k3.metric("Avg Check",     f"€{curr_avg:.2f}",
+              delta=pct_delta(curr_avg, prev_avg),
+              delta_color="normal")
+    k4.metric("Top Server",    top_server)
+ 
     st.divider()
-
+ 
+    # ── Revenue by Day ─────────────────────────────────────────────────────────
     col_left, col_right = st.columns(2)
+ 
     with col_left:
         st.subheader("Revenue by Day")
         daily = filtered_txn.groupby("date")["total"].sum().reset_index()
-        daily.columns = ["Date", "Revenue (€)"]
-        st.bar_chart(daily.set_index("Date"))
+        daily.columns = ["Date", "Revenue"]
+        daily["Date"] = daily["Date"].astype(str)
+        fig_daily = go.Figure(go.Bar(
+            x=daily["Date"],
+            y=daily["Revenue"],
+            marker_color="#2c3e7a",
+            hovertemplate="<b>%{x}</b><br>Revenue: €%{y:,.2f}<extra></extra>",
+        ))
+        fig_daily.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#cccccc", xaxis_title=None, yaxis_title="€",
+            margin=dict(t=20, b=20),
+        )
+        st.plotly_chart(fig_daily, use_container_width=True)
+ 
     with col_right:
         st.subheader("Transactions by Hour")
         hourly = filtered_txn.groupby("hour").size().reset_index(name="Count")
-        st.bar_chart(hourly.set_index("hour"))
-
+        fig_hourly = go.Figure(go.Bar(
+            x=hourly["hour"],
+            y=hourly["Count"],
+            marker_color="#8b6914",
+            hovertemplate="<b>%{x}:00</b><br>Transactions: %{y}<extra></extra>",
+        ))
+        fig_hourly.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#cccccc", xaxis_title="Hour", yaxis_title="Transactions",
+            margin=dict(t=20, b=20),
+        )
+        st.plotly_chart(fig_hourly, use_container_width=True)
+ 
     st.divider()
-
+ 
+    # ── Items & Categories ─────────────────────────────────────────────────────
     col_a, col_b = st.columns(2)
+ 
     with col_a:
         st.subheader("Top 10 Items by Revenue")
-        top_items = filtered_items.groupby("item_name")["subtotal"].sum().sort_values(ascending=False).head(10).reset_index()
-        top_items.columns = ["Item", "Revenue (€)"]
-        st.bar_chart(top_items.set_index("Item"))
+        top_items = (filtered_items.groupby("item_name")["subtotal"]
+                     .sum().sort_values(ascending=True).tail(10).reset_index())
+        top_items.columns = ["Item", "Revenue"]
+        fig_items = go.Figure(go.Bar(
+            x=top_items["Revenue"],
+            y=top_items["Item"],
+            orientation="h",
+            marker_color="#1a6b3a",
+            hovertemplate="<b>%{y}</b><br>Revenue: €%{x:,.2f}<extra></extra>",
+        ))
+        fig_items.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#cccccc", xaxis_title="€", yaxis_title=None,
+            margin=dict(t=20, b=20),
+        )
+        st.plotly_chart(fig_items, use_container_width=True)
+ 
     with col_b:
         st.subheader("Revenue by Category")
-        by_cat = filtered_items.groupby("category")["subtotal"].sum().sort_values(ascending=False).reset_index()
-        by_cat.columns = ["Category", "Revenue (€)"]
-        st.bar_chart(by_cat.set_index("Category"))
-
+        by_cat = (filtered_items.groupby("category")["subtotal"]
+                  .sum().sort_values(ascending=False).reset_index())
+        by_cat.columns = ["Category", "Revenue"]
+        fig_cat = px.pie(
+            by_cat, values="Revenue", names="Category",
+            hole=0.4,
+            color_discrete_sequence=["#2c3e7a", "#8b6914", "#1a6b3a", "#a32d2d", "#555555"],
+        )
+        fig_cat.update_traces(
+            hovertemplate="<b>%{label}</b><br>€%{value:,.2f}<br>%{percent}<extra></extra>",
+            textinfo="label+percent",
+        )
+        fig_cat.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#cccccc", showlegend=False,
+            margin=dict(t=20, b=20),
+        )
+        st.plotly_chart(fig_cat, use_container_width=True)
+ 
     st.divider()
-
+ 
+    # ── Payment Methods & Server Performance ───────────────────────────────────
     col_p, col_s = st.columns(2)
+ 
     with col_p:
         st.subheader("Payment Methods")
         pm = filtered_txn["payment_method"].value_counts().reset_index()
         pm.columns = ["Method", "Count"]
-        st.dataframe(pm, use_container_width=True, hide_index=True)
+        fig_pm = go.Figure(go.Bar(
+            x=pm["Method"],
+            y=pm["Count"],
+            marker_color=["#2c3e7a", "#8b6914", "#1a6b3a"],
+            hovertemplate="<b>%{x}</b><br>Count: %{y}<extra></extra>",
+        ))
+        fig_pm.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#cccccc", xaxis_title=None, yaxis_title="Transactions",
+            margin=dict(t=20, b=20),
+        )
+        st.plotly_chart(fig_pm, use_container_width=True)
+ 
     with col_s:
         st.subheader("Revenue by Server")
         by_server = (filtered_txn.groupby("server")["total"]
             .agg(["sum", "count", "mean"])
-            .rename(columns={"sum": "Revenue (€)", "count": "Transactions", "mean": "Avg Check (€)"})
-            .sort_values("Revenue (€)", ascending=False).reset_index())
-        st.dataframe(by_server, use_container_width=True, hide_index=True)
-
+            .rename(columns={"sum": "Revenue", "count": "Transactions", "mean": "Avg Check"})
+            .sort_values("Revenue", ascending=False).reset_index())
+        fig_srv = go.Figure()
+        fig_srv.add_trace(go.Bar(
+            x=by_server["server"], y=by_server["Revenue"],
+            name="Revenue (€)", marker_color="#2c3e7a",
+            hovertemplate="<b>%{x}</b><br>Revenue: €%{y:,.2f}<extra></extra>",
+        ))
+        fig_srv.add_trace(go.Scatter(
+            x=by_server["server"], y=by_server["Avg Check"],
+            name="Avg Check (€)", mode="markers",
+            marker=dict(color="#e8b84b", size=10),
+            hovertemplate="<b>%{x}</b><br>Avg Check: €%{y:,.2f}<extra></extra>",
+            yaxis="y2",
+        ))
+        fig_srv.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#cccccc", xaxis_title=None,
+            yaxis=dict(title="Revenue (€)"),
+            yaxis2=dict(title="Avg Check (€)", overlaying="y", side="right"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            margin=dict(t=40, b=20),
+        )
+        st.plotly_chart(fig_srv, use_container_width=True)
+ 
     st.divider()
     st.subheader("Pipeline Health")
     if not runs.empty:
@@ -418,12 +539,11 @@ elif page == "Sales":
             st.error(f"Last run FAILED: {last_run['run_at']}  |  {last_run['error_msg']}")
         with st.expander("Recent pipeline runs"):
             st.dataframe(runs.rename(columns={"run_at": "Run at", "fetched": "Fetched", "cleaned": "Cleaned", "inserted": "Inserted", "skipped": "Skipped", "status": "Status", "error_msg": "Error"}).drop(columns=["id"]), use_container_width=True, hide_index=True)
-
+ 
     st.divider()
     with st.expander("Raw Transactions"):
         st.dataframe(filtered_txn.drop(columns=["date", "hour", "month"]).sort_values("timestamp", ascending=False), use_container_width=True, hide_index=True)
-
-
+ 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: PAYROLL
 # ══════════════════════════════════════════════════════════════════════════════
