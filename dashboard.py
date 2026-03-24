@@ -914,11 +914,16 @@ elif page == "P&L":
         {"Line Item": "Net Profit / Loss",        "Amount (€)": f"€{net_profit:,.2f}"},
     ]), use_container_width=True, hide_index=True)
 
-    # ── Cumulative P&L chart ───────────────────────────────────────────────────
+   # ── Cumulative P&L chart ───────────────────────────────────────────────────
 
     st.divider()
     st.subheader("Monthly Performance & Road to Profitability")
     st.caption("Bars show monthly net profit/loss. Line shows cumulative position.")
+
+    STARTING_CAPITAL  = 200_000
+    WARNING_THRESHOLD = -STARTING_CAPITAL * 0.50   # -€100,000
+    DANGER_THRESHOLD  = -STARTING_CAPITAL * 0.75   # -€150,000
+    TERMINAL_THRESHOLD= -STARTING_CAPITAL * 0.90   # -€180,000
 
     pl_rows = []
     for m in sorted(common_months):
@@ -941,7 +946,7 @@ elif page == "P&L":
         })
 
     if len(pl_rows) > 0:
-        pl_df              = pd.DataFrame(pl_rows)
+        pl_df               = pd.DataFrame(pl_rows)
         pl_df["cumulative"] = pl_df["net_profit"].cumsum()
 
         bar_colors = ["#1a6b3a" if v >= 0 else "#a32d2d" for v in pl_df["net_profit"]]
@@ -966,14 +971,14 @@ elif page == "P&L":
             hovertemplate="<b>%{x}</b><br>Cumulative: €%{y:,.2f}<extra></extra>",
         ))
 
-        fig.add_hline(
-            y=0,
-            line_dash="dash",
-            line_color="#888888",
-            line_width=1,
-            annotation_text="Break-even",
-            annotation_position="bottom right",
-        )
+        fig.add_hline(y=0,          line_dash="dash", line_color="#888888", line_width=1,
+                      annotation_text="Break-even",   annotation_position="bottom right")
+        fig.add_hline(y=-100_000,   line_dash="dot",  line_color="#e8b84b", line_width=1,
+                      annotation_text="Warning (50%)", annotation_position="bottom right")
+        fig.add_hline(y=-150_000,   line_dash="dot",  line_color="#d85a30", line_width=1,
+                      annotation_text="Danger (75%)",  annotation_position="bottom right")
+        fig.add_hline(y=-180_000,   line_dash="dot",  line_color="#a32d2d", line_width=1,
+                      annotation_text="Critical (90%)", annotation_position="bottom right")
 
         fig.update_layout(
             barmode="relative",
@@ -988,10 +993,45 @@ elif page == "P&L":
 
         st.plotly_chart(fig, use_container_width=True)
 
-        final_cumulative = pl_df["cumulative"].iloc[-1]
+        final_cumulative  = pl_df["cumulative"].iloc[-1]
+        capital_remaining = STARTING_CAPITAL + final_cumulative
+        capital_consumed  = (abs(final_cumulative) / STARTING_CAPITAL * 100) if final_cumulative < 0 else 0
+
         if final_cumulative >= 0:
-            st.success(f"Cumulative position: **+€{final_cumulative:,.2f}** — the restaurant is in the black.")
+            st.success(f"Cumulative position: **+€{final_cumulative:,.2f}** — the restaurant is profitable.")
+        elif final_cumulative >= WARNING_THRESHOLD:
+            st.success(
+                f"Cumulative loss: **-€{abs(final_cumulative):,.2f}** ({capital_consumed:.1f}% of capital consumed) — "
+                f"within expected startup range. Capital remaining: **€{capital_remaining:,.2f}**"
+            )
+        elif final_cumulative >= DANGER_THRESHOLD:
+            st.warning(
+                f"⚠️ WARNING — Cumulative loss: **-€{abs(final_cumulative):,.2f}** "
+                f"({capital_consumed:.1f}% of capital consumed). "
+                f"Capital remaining: **€{capital_remaining:,.2f}**. "
+                f"Review pricing, staffing and cost structure urgently."
+            )
+        elif final_cumulative >= TERMINAL_THRESHOLD:
+            st.error(
+                f"🚨 DANGER — Cumulative loss: **-€{abs(final_cumulative):,.2f}** "
+                f"({capital_consumed:.1f}% of capital consumed). "
+                f"Capital remaining: **€{capital_remaining:,.2f}**. "
+                f"Major decisions required — consider restructuring or pivoting the business model."
+            )
         else:
-            st.warning(f"Cumulative position: **-€{abs(final_cumulative):,.2f}** — still recovering initial losses.")
+            st.error(
+                f"🔴 CRITICAL — Cumulative loss: **-€{abs(final_cumulative):,.2f}** "
+                f"({capital_consumed:.1f}% of capital consumed). "
+                f"Capital remaining: **€{capital_remaining:,.2f}**. "
+                f"Capital nearly depleted. Immediate action required."
+            )
+
+        st.markdown("**Capital runway**")
+        col_r1, col_r2, col_r3 = st.columns(3)
+        col_r1.metric("Starting Capital", f"€{STARTING_CAPITAL:,.2f}")
+        col_r2.metric("Consumed",         f"€{abs(min(final_cumulative, 0)):,.2f} ({capital_consumed:.1f}%)")
+        col_r3.metric("Remaining",        f"€{max(capital_remaining, 0):,.2f}")
+        st.progress(min(capital_consumed / 100, 1.0))
+
     else:
         st.info("Need at least one month of complete data to show P&L trend.")
