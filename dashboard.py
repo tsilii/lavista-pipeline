@@ -8,8 +8,6 @@ from datetime import date
 import pandas as pd
 import psycopg2
 import streamlit as st
-import plotly.express as px
-import plotly.graph_objects as go
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -304,10 +302,10 @@ if page == "Home":
     c4, c5, c6 = st.columns(3)
     with c4:
         st.markdown("#### 🚚 Suppliers")
-        st.markdown("Delivery log, monthly balance per supplier, carried over unpaid amounts, historical pivot table.")
+        st.markdown("Delivery log, monthly balance per supplier, carried over unpaid amounts.")
     with c5:
         st.markdown("#### 📈 P&L")
-        st.markdown("Full profit & loss statement — gross profit, net margin, health checks.")
+        st.markdown("Full P&L statement, health checks, road to profitability chart.")
     with c6:
         st.markdown("#### 📦 Inventory")
         st.markdown("Coming soon — stock levels, low stock alerts, waste tracking.")
@@ -550,17 +548,11 @@ elif page == "Expenses":
             if len(all_months) > 1:
                 st.divider()
                 st.subheader("Historical Expenses")
-
                 import plotly.express as px
-
-                # Build pivot — one row per month/category
-                hist = expenses.copy()
-                hist["Month"] = pd.to_datetime(hist["month"]).dt.strftime("%B %Y")
-
-                # Sort months chronologically
+                hist             = expenses.copy()
+                hist["Month"]    = pd.to_datetime(hist["month"]).dt.strftime("%B %Y")
                 hist["month_dt"] = pd.to_datetime(hist["month"])
-                month_order = hist.sort_values("month_dt")["Month"].unique().tolist()
-
+                month_order      = hist.sort_values("month_dt")["Month"].unique().tolist()
                 fig = px.bar(
                     hist,
                     x="Month",
@@ -568,7 +560,6 @@ elif page == "Expenses":
                     color="category",
                     category_orders={"Month": month_order},
                     labels={"amount": "Amount (€)", "category": "Category"},
-                    text_auto=False,
                 )
                 fig.update_layout(
                     barmode="stack",
@@ -580,9 +571,7 @@ elif page == "Expenses":
                     font_color="#cccccc",
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 )
-                fig.update_traces(
-                    hovertemplate="<b>%{x}</b><br>%{fullData.name}: €%{y:,.2f}<extra></extra>"
-                )
+                fig.update_traces(hovertemplate="<b>%{x}</b><br>%{fullData.name}: €%{y:,.2f}<extra></extra>")
                 st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
@@ -642,7 +631,6 @@ elif page == "Suppliers":
 
     if deliveries is not None and not deliveries.empty:
 
-        # ── Month selector ─────────────────────────────────────────────────────
         all_months     = sorted(deliveries["month"].unique(), reverse=True)
         col_month, _   = st.columns([2, 4])
         with col_month:
@@ -651,11 +639,9 @@ elif page == "Suppliers":
                 format_func=lambda m: m.strftime("%B %Y")
             )
 
-        # Split deliveries: this month vs previous months
         month_del = deliveries[deliveries["month"] == selected_month]
         prev_del  = deliveries[deliveries["month"] < selected_month]
 
-        # ── KPIs ───────────────────────────────────────────────────────────────
         total_ordered      = float(month_del["amount"].sum())
         total_paid_month   = float(month_del[month_del["paid"] == True]["amount"].sum())
         total_owed_month   = total_ordered - total_paid_month
@@ -666,14 +652,10 @@ elif page == "Suppliers":
         k1.metric("This Month Ordered",  f"€{total_ordered:,.2f}")
         k2.metric("Paid This Month",     f"€{total_paid_month:,.2f}")
         k3.metric("This Month Owed",     f"€{total_owed_month:,.2f}")
-        k4.metric("Carried Over",        f"€{total_carried_over:,.2f}",
-                  help="Unpaid amounts from previous months")
-        k5.metric("Total Outstanding",   f"€{total_outstanding:,.2f}",
-                  help="This month owed + carried over from previous months")
+        k4.metric("Carried Over",        f"€{total_carried_over:,.2f}", help="Unpaid from previous months")
+        k5.metric("Total Outstanding",   f"€{total_outstanding:,.2f}", help="This month + carried over")
 
         st.divider()
-
-        # ── Monthly summary per supplier ───────────────────────────────────────
         st.subheader(f"Supplier Balance — {selected_month.strftime('%B %Y')}")
         st.caption("Carried Over = unpaid deliveries from all previous months per supplier")
 
@@ -684,50 +666,43 @@ elif page == "Suppliers":
             sup_month = month_del[month_del["supplier_name"] == supplier]
             sup_prev  = prev_del[prev_del["supplier_name"] == supplier] if not prev_del.empty else pd.DataFrame()
 
-            this_ordered    = float(sup_month["amount"].sum())
-            this_paid       = float(sup_month[sup_month["paid"] == True]["amount"].sum()) if not sup_month.empty else 0.0
-            this_owed       = this_ordered - this_paid
-            carried         = float(sup_prev[sup_prev["paid"] == False]["amount"].sum()) if not sup_prev.empty else 0.0
-            total_owed_sup  = this_owed + carried
-            deliveries_count= len(sup_month)
+            this_ordered = float(sup_month["amount"].sum())
+            this_paid    = float(sup_month[sup_month["paid"] == True]["amount"].sum()) if not sup_month.empty else 0.0
+            this_owed    = this_ordered - this_paid
+            carried      = float(sup_prev[sup_prev["paid"] == False]["amount"].sum()) if not sup_prev.empty else 0.0
+            total_owed_s = this_owed + carried
 
             if this_ordered > 0 or carried > 0:
                 summary_rows.append({
-                    "Supplier":            supplier,
-                    "Deliveries":          deliveries_count,
-                    "Monthly Total (€)":   f"€{this_ordered:,.2f}",
-                    "Paid (€)":            f"€{this_paid:,.2f}",
-                    "This Month Owed (€)": f"€{this_owed:,.2f}",
-                    "Carried Over (€)":    f"€{carried:,.2f}",
-                    "Total Outstanding (€)": f"€{total_owed_sup:,.2f}",
+                    "Supplier":              supplier,
+                    "Deliveries":            len(sup_month),
+                    "Monthly Total (€)":     f"€{this_ordered:,.2f}",
+                    "Paid (€)":              f"€{this_paid:,.2f}",
+                    "This Month Owed (€)":   f"€{this_owed:,.2f}",
+                    "Carried Over (€)":      f"€{carried:,.2f}",
+                    "Total Outstanding (€)": f"€{total_owed_s:,.2f}",
                 })
 
         if summary_rows:
-            summary_df = pd.DataFrame(summary_rows)
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
         st.divider()
-
-        # ── Delivery log with monthly running total ────────────────────────────
         st.subheader(f"Delivery Log — {selected_month.strftime('%B %Y')}")
 
         if month_del.empty:
             st.info("No deliveries recorded for this month.")
         else:
-            # Show per supplier with running total
             for supplier in sorted(month_del["supplier_name"].unique()):
-                sup_del = month_del[month_del["supplier_name"] == supplier].sort_values("delivery_date")
+                sup_del   = month_del[month_del["supplier_name"] == supplier].sort_values("delivery_date")
                 sup_total = float(sup_del["amount"].sum())
                 sup_paid  = float(sup_del[sup_del["paid"] == True]["amount"].sum())
                 sup_owed  = sup_total - sup_paid
 
                 with st.expander(
                     f"**{supplier}** — {len(sup_del)} deliveries — "
-                    f"Monthly total: €{sup_total:,.2f} — "
-                    f"Owed: €{sup_owed:,.2f}",
+                    f"Monthly total: €{sup_total:,.2f} — Owed: €{sup_owed:,.2f}",
                     expanded=True
                 ):
-                    # Header row
                     h1, h2, h3, h4, h5 = st.columns([1.5, 3, 1.5, 1.2, 0.5])
                     h1.markdown("**Date**")
                     h2.markdown("**Description**")
@@ -735,18 +710,13 @@ elif page == "Suppliers":
                     h4.markdown("**Paid**")
                     h5.markdown("**Del**")
 
-                    running_total = 0.0
                     for _, row in sup_del.iterrows():
-                        running_total += float(row["amount"])
                         c1, c2, c3, c4, c5 = st.columns([1.5, 3, 1.5, 1.2, 0.5])
                         c1.write(str(row["delivery_date"]))
                         c2.write(row["description"] or "—")
                         c3.write(f"€{row['amount']:,.2f}")
 
-                        paid_toggle = c4.checkbox(
-                            "Paid", value=bool(row["paid"]),
-                            key=f"paid_{row['id']}"
-                        )
+                        paid_toggle = c4.checkbox("Paid", value=bool(row["paid"]), key=f"paid_{row['id']}")
                         if paid_toggle != bool(row["paid"]):
                             success, _ = toggle_paid(row["id"], paid_toggle)
                             if success:
@@ -761,7 +731,6 @@ elif page == "Suppliers":
                             else:
                                 st.error(message)
 
-                    # Monthly total footer
                     st.markdown("---")
                     f1, f2, f3 = st.columns([4.5, 1.5, 1.2])
                     f1.markdown(f"**Monthly total for {supplier}**")
@@ -769,31 +738,21 @@ elif page == "Suppliers":
                     f3.markdown(f"**Owed: €{sup_owed:,.2f}**")
 
         st.divider()
-
-        # ── Historical pivot table ─────────────────────────────────────────────
         st.subheader("Supplier Expenses — All Months")
-        st.caption("Total deliveries per supplier per month (€) — all time")
+        st.caption("Total deliveries per supplier per month (€)")
 
-        pivot = deliveries.copy()
+        pivot            = deliveries.copy()
         pivot["month_label"] = pivot["month"].apply(lambda m: m.strftime("%b %Y"))
-        pivot_table = pivot.pivot_table(
-            index="supplier_name",
-            columns="month_label",
-            values="amount",
-            aggfunc="sum",
-            fill_value=0,
-        )
-
-        month_order = sorted(pivot["month"].unique())
-        col_order   = [m.strftime("%b %Y") for m in month_order]
-        pivot_table = pivot_table.reindex(columns=col_order, fill_value=0)
+        pivot_table      = pivot.pivot_table(index="supplier_name", columns="month_label",
+                                             values="amount", aggfunc="sum", fill_value=0)
+        month_order      = sorted(pivot["month"].unique())
+        col_order        = [m.strftime("%b %Y") for m in month_order]
+        pivot_table      = pivot_table.reindex(columns=col_order, fill_value=0)
         pivot_table["Total"] = pivot_table.sum(axis=1)
-
-        total_row      = pivot_table.sum(axis=0)
-        total_row.name = "TOTAL"
-        pivot_table    = pd.concat([pivot_table, total_row.to_frame().T])
-
-        formatted = pivot_table.map(lambda x: f"€{x:,.2f}" if x > 0 else "—")
+        total_row        = pivot_table.sum(axis=0)
+        total_row.name   = "TOTAL"
+        pivot_table      = pd.concat([pivot_table, total_row.to_frame().T])
+        formatted        = pivot_table.map(lambda x: f"€{x:,.2f}" if x > 0 else "—")
         formatted.index.name = "Supplier"
         st.dataframe(formatted, use_container_width=True)
 
@@ -801,8 +760,6 @@ elif page == "Suppliers":
         st.info("No deliveries recorded yet. Add your first delivery below.")
 
     st.divider()
-
-    # ── Add delivery form ──────────────────────────────────────────────────────
     st.subheader("Add Delivery")
 
     col1, col2 = st.columns(2)
@@ -842,6 +799,8 @@ elif page == "Inventory":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "P&L":
+    import plotly.graph_objects as go
+
     st.title("Sova Bistrot — Profit & Loss")
 
     COGS_RATE = 0.30
@@ -930,7 +889,8 @@ elif page == "P&L":
 
     with col_right:
         st.subheader("Cost Breakdown")
-        breakdown = pd.DataFrame({"Category": ["COGS", "Payroll", "Expenses"], "Amount (€)": [cogs, total_payroll, total_expenses_amt]})
+        breakdown = pd.DataFrame({"Category": ["COGS", "Payroll", "Expenses"],
+                                  "Amount (€)": [cogs, total_payroll, total_expenses_amt]})
         st.bar_chart(breakdown.set_index("Category"))
         st.divider()
         st.subheader("Health Check")
@@ -956,89 +916,82 @@ elif page == "P&L":
 
     # ── Cumulative P&L chart ───────────────────────────────────────────────────
 
-st.divider()
-st.subheader("Monthly Performance & Road to Profitability")
-st.caption("Bars show monthly net profit/loss. Line shows cumulative position.")
+    st.divider()
+    st.subheader("Monthly Performance & Road to Profitability")
+    st.caption("Bars show monthly net profit/loss. Line shows cumulative position.")
 
+    pl_rows = []
+    for m in sorted(common_months):
+        m_txn      = txn[txn["month"] == m]
+        m_exp_date = date(m.year, m.month, 1)
+        m_exp      = expenses[expenses["month"] == m_exp_date]
 
+        if m_txn.empty or m_exp.empty:
+            continue
 
-# Build monthly P&L across all available months
-pl_rows = []
-for m in sorted(common_months):
-    m_txn      = txn[txn["month"] == m]
-    m_exp_date = date(m.year, m.month, 1)
-    m_exp      = expenses[expenses["month"] == m_exp_date]
+        m_revenue = float(m_txn["total"].sum())
+        m_cogs    = m_revenue * COGS_RATE
+        m_gp      = m_revenue - m_cogs
+        m_opex    = float(employees["monthly_salary"].sum()) + float(m_exp["amount"].sum())
+        m_net     = m_gp - m_opex
 
-    if m_txn.empty or m_exp.empty:
-        continue
+        pl_rows.append({
+            "month":      m.strftime("%B %Y"),
+            "net_profit": m_net,
+        })
 
-    m_revenue  = float(m_txn["total"].sum())
-    m_cogs     = m_revenue * COGS_RATE
-    m_gp       = m_revenue - m_cogs
-    m_opex     = float(employees["monthly_salary"].sum()) + float(m_exp["amount"].sum())
-    m_net      = m_gp - m_opex
+    if len(pl_rows) > 0:
+        pl_df              = pd.DataFrame(pl_rows)
+        pl_df["cumulative"] = pl_df["net_profit"].cumsum()
 
-    pl_rows.append({
-        "month":      m.strftime("%B %Y"),
-        "net_profit": m_net,
-    })
+        bar_colors = ["#1a6b3a" if v >= 0 else "#a32d2d" for v in pl_df["net_profit"]]
 
-if len(pl_rows) > 0:
-    pl_df = pd.DataFrame(pl_rows)
-    pl_df["cumulative"] = pl_df["net_profit"].cumsum()
+        fig = go.Figure()
 
-    bar_colors = ["#1a6b3a" if v >= 0 else "#a32d2d" for v in pl_df["net_profit"]]
+        fig.add_trace(go.Bar(
+            x=pl_df["month"],
+            y=pl_df["net_profit"],
+            name="Monthly Net Profit/Loss",
+            marker_color=bar_colors,
+            hovertemplate="<b>%{x}</b><br>Monthly: €%{y:,.2f}<extra></extra>",
+        ))
 
-    fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=pl_df["month"],
+            y=pl_df["cumulative"],
+            name="Cumulative P&L",
+            mode="lines+markers",
+            line=dict(color="#e8b84b", width=2.5),
+            marker=dict(size=8),
+            hovertemplate="<b>%{x}</b><br>Cumulative: €%{y:,.2f}<extra></extra>",
+        ))
 
-    # Monthly bars
-    fig.add_trace(go.Bar(
-        x=pl_df["month"],
-        y=pl_df["net_profit"],
-        name="Monthly Net Profit/Loss",
-        marker_color=bar_colors,
-        hovertemplate="<b>%{x}</b><br>Monthly: €%{y:,.2f}<extra></extra>",
-    ))
+        fig.add_hline(
+            y=0,
+            line_dash="dash",
+            line_color="#888888",
+            line_width=1,
+            annotation_text="Break-even",
+            annotation_position="bottom right",
+        )
 
-    # Cumulative line
-    fig.add_trace(go.Scatter(
-        x=pl_df["month"],
-        y=pl_df["cumulative"],
-        name="Cumulative P&L",
-        mode="lines+markers",
-        line=dict(color="#e8b84b", width=2.5),
-        marker=dict(size=8),
-        hovertemplate="<b>%{x}</b><br>Cumulative: €%{y:,.2f}<extra></extra>",
-    ))
+        fig.update_layout(
+            barmode="relative",
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#cccccc",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            xaxis_title=None,
+            yaxis_title="€",
+            hovermode="x unified",
+        )
 
-    # Break-even line
-    fig.add_hline(
-        y=0,
-        line_dash="dash",
-        line_color="#888888",
-        line_width=1,
-        annotation_text="Break-even",
-        annotation_position="bottom right",
-    )
+        st.plotly_chart(fig, use_container_width=True)
 
-    fig.update_layout(
-        barmode="relative",
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        font_color="#cccccc",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis_title=None,
-        yaxis_title="€",
-        hovermode="x unified",
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Current cumulative state
-    final_cumulative = pl_df["cumulative"].iloc[-1]
-    if final_cumulative >= 0:
-        st.success(f"Cumulative position: **+€{final_cumulative:,.2f}** — the restaurant is in the black.")
+        final_cumulative = pl_df["cumulative"].iloc[-1]
+        if final_cumulative >= 0:
+            st.success(f"Cumulative position: **+€{final_cumulative:,.2f}** — the restaurant is in the black.")
+        else:
+            st.warning(f"Cumulative position: **-€{abs(final_cumulative):,.2f}** — still recovering initial losses.")
     else:
-        st.warning(f"Cumulative position: **-€{abs(final_cumulative):,.2f}** — still recovering initial losses.")
-else:
-    st.info("Need at least one month of complete data to show P&L trend.")
+        st.info("Need at least one month of complete data to show P&L trend.")
