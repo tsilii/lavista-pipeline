@@ -927,16 +927,90 @@ elif page == "P&L":
         {"Line Item": "Net Profit / Loss",        "Amount (€)": f"€{net_profit:,.2f}"},
     ]), use_container_width=True, hide_index=True)
 
-   # ── Cumulative P&L chart ───────────────────────────────────────────────────
+    # ── Revenue trend chart ────────────────────────────────────────────────────
+
+    st.divider()
+    st.subheader("Monthly Revenue Trend")
+    st.caption("Revenue per month vs break-even point. Shows if the restaurant is growing.")
+
+    # Calculate break-even revenue — the revenue needed to cover all fixed costs
+    breakeven_revenue = (total_payroll + total_expenses_amt) / (1 - COGS_RATE)
+
+    rev_rows = []
+    for m in sorted(sales_months):
+        m_rev = float(txn[txn["month"] == m]["total"].sum())
+        rev_rows.append({
+            "month":   m.strftime("%B %Y"),
+            "revenue": m_rev,
+        })
+
+    if rev_rows:
+        rev_df = pd.DataFrame(rev_rows)
+
+        fig_rev = go.Figure()
+
+        # Revenue bars — green if above break-even, amber if below
+        bar_colors_rev = ["#1a6b3a" if v >= breakeven_revenue else "#8b6914" for v in rev_df["revenue"]]
+
+        fig_rev.add_trace(go.Bar(
+            x=rev_df["month"],
+            y=rev_df["revenue"],
+            name="Monthly Revenue",
+            marker_color=bar_colors_rev,
+            hovertemplate="<b>%{x}</b><br>Revenue: €%{y:,.2f}<extra></extra>",
+        ))
+
+        # Break-even line
+        fig_rev.add_hline(
+            y=breakeven_revenue,
+            line_dash="dash",
+            line_color="#e8b84b",
+            line_width=2,
+            annotation_text=f"Break-even (€{breakeven_revenue:,.0f})",
+            annotation_position="top right",
+        )
+
+        # Trend line using rolling average if enough data
+        if len(rev_df) >= 2:
+            fig_rev.add_trace(go.Scatter(
+                x=rev_df["month"],
+                y=rev_df["revenue"],
+                name="Revenue trend",
+                mode="lines+markers",
+                line=dict(color="#85b7eb", width=2, dash="dot"),
+                marker=dict(size=6),
+                hovertemplate="<b>%{x}</b><br>Revenue: €%{y:,.2f}<extra></extra>",
+            ))
+
+        fig_rev.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            font_color="#cccccc",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            xaxis_title=None,
+            yaxis_title="Revenue (€)",
+            hovermode="x unified",
+        )
+
+        st.plotly_chart(fig_rev, use_container_width=True)
+
+        # Gap to break-even for selected month
+        gap = gross_revenue - breakeven_revenue
+        if gap >= 0:
+            st.success(f"{selected_month.strftime('%B %Y')} revenue is **€{gap:,.2f} above break-even** — costs are covered.")
+        else:
+            st.warning(f"{selected_month.strftime('%B %Y')} revenue is **€{abs(gap):,.2f} below break-even** — need €{breakeven_revenue:,.2f}/month to cover all costs.")
+
+    # ── Cumulative P&L chart ───────────────────────────────────────────────────
 
     st.divider()
     st.subheader("Monthly Performance & Road to Profitability")
     st.caption("Bars show monthly net profit/loss. Line shows cumulative position.")
 
-    STARTING_CAPITAL  = 200_000
-    WARNING_THRESHOLD = -STARTING_CAPITAL * 0.50   # -€100,000
-    DANGER_THRESHOLD  = -STARTING_CAPITAL * 0.75   # -€150,000
-    TERMINAL_THRESHOLD= -STARTING_CAPITAL * 0.90   # -€180,000
+    STARTING_CAPITAL   = 200_000
+    WARNING_THRESHOLD  = -STARTING_CAPITAL * 0.50
+    DANGER_THRESHOLD   = -STARTING_CAPITAL * 0.75
+    TERMINAL_THRESHOLD = -STARTING_CAPITAL * 0.90
 
     pl_rows = []
     for m in sorted(common_months):
@@ -984,13 +1058,13 @@ elif page == "P&L":
             hovertemplate="<b>%{x}</b><br>Cumulative: €%{y:,.2f}<extra></extra>",
         ))
 
-        fig.add_hline(y=0,          line_dash="dash", line_color="#888888", line_width=1,
-                      annotation_text="Break-even",   annotation_position="bottom right")
-        fig.add_hline(y=-100_000,   line_dash="dot",  line_color="#e8b84b", line_width=1,
+        fig.add_hline(y=0,        line_dash="dash", line_color="#888888", line_width=1,
+                      annotation_text="Break-even",    annotation_position="bottom right")
+        fig.add_hline(y=-100_000, line_dash="dot",  line_color="#e8b84b", line_width=1,
                       annotation_text="Warning (50%)", annotation_position="bottom right")
-        fig.add_hline(y=-150_000,   line_dash="dot",  line_color="#d85a30", line_width=1,
+        fig.add_hline(y=-150_000, line_dash="dot",  line_color="#d85a30", line_width=1,
                       annotation_text="Danger (75%)",  annotation_position="bottom right")
-        fig.add_hline(y=-180_000,   line_dash="dot",  line_color="#a32d2d", line_width=1,
+        fig.add_hline(y=-180_000, line_dash="dot",  line_color="#a32d2d", line_width=1,
                       annotation_text="Critical (90%)", annotation_position="bottom right")
 
         fig.update_layout(
@@ -1029,7 +1103,7 @@ elif page == "P&L":
                 f"🚨 DANGER — Cumulative loss: **-€{abs(final_cumulative):,.2f}** "
                 f"({capital_consumed:.1f}% of capital consumed). "
                 f"Capital remaining: **€{capital_remaining:,.2f}**. "
-                f"Major decisions required — consider restructuring or pivoting the business model."
+                f"Major decisions required — consider restructuring or pivoting."
             )
         else:
             st.error(
