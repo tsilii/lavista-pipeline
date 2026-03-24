@@ -549,9 +549,10 @@ elif page == "Expenses":
                 st.divider()
                 st.subheader("Historical Expenses")
                 monthly_totals = expenses.groupby("month")["amount"].sum().reset_index()
-                monthly_totals.columns = ["Month", "Total Expenses (€)"]
+                monthly_totals["Month"] = pd.to_datetime(monthly_totals["month"]).dt.strftime("%B %Y")
+                monthly_totals = monthly_totals.rename(columns={"amount": "Total Expenses (€)"})
                 st.bar_chart(monthly_totals.set_index("Month"))
-
+                
     st.divider()
     st.subheader("Manage Expenses")
     tab_add, tab_delete = st.tabs(["Add / Update", "Delete"])
