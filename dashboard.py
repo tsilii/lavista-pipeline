@@ -8,6 +8,7 @@ from datetime import date
 import pandas as pd
 import psycopg2
 import streamlit as st
+import plotly.express as px
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -548,11 +549,41 @@ elif page == "Expenses":
             if len(all_months) > 1:
                 st.divider()
                 st.subheader("Historical Expenses")
-                monthly_totals = expenses.groupby("month")["amount"].sum().reset_index()
-                monthly_totals["Month"] = pd.to_datetime(monthly_totals["month"]).dt.strftime("%B %Y")
-                monthly_totals = monthly_totals.rename(columns={"amount": "Total Expenses (€)"})
-                st.bar_chart(monthly_totals.set_index("Month"))
-                
+
+                import plotly.express as px
+
+                # Build pivot — one row per month/category
+                hist = expenses.copy()
+                hist["Month"] = pd.to_datetime(hist["month"]).dt.strftime("%B %Y")
+
+                # Sort months chronologically
+                hist["month_dt"] = pd.to_datetime(hist["month"])
+                month_order = hist.sort_values("month_dt")["Month"].unique().tolist()
+
+                fig = px.bar(
+                    hist,
+                    x="Month",
+                    y="amount",
+                    color="category",
+                    category_orders={"Month": month_order},
+                    labels={"amount": "Amount (€)", "category": "Category"},
+                    text_auto=False,
+                )
+                fig.update_layout(
+                    barmode="stack",
+                    legend_title="Category",
+                    xaxis_title=None,
+                    yaxis_title="Total Expenses (€)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font_color="#cccccc",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                fig.update_traces(
+                    hovertemplate="<b>%{x}</b><br>%{fullData.name}: €%{y:,.2f}<extra></extra>"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
     st.divider()
     st.subheader("Manage Expenses")
     tab_add, tab_delete = st.tabs(["Add / Update", "Delete"])
