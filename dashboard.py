@@ -581,21 +581,34 @@ elif page == "Expenses":
     with tab_add:
         col1, col2 = st.columns(2)
         with col1:
-            form_month       = st.date_input("Month", value=date.today().replace(day=1))
-            form_category    = st.selectbox("Category", options=EXPENSE_CATEGORIES)
-            form_description = st.text_input("Description", placeholder="e.g. Electricity bill March")
+            form_month        = st.date_input("Month", value=date.today().replace(day=1))
+            form_category_sel = st.selectbox("Category", options=EXPENSE_CATEGORIES + ["+ New category"])
+            if form_category_sel == "+ New category":
+                form_category = st.text_input("New category name", placeholder="e.g. Equipment repair")
+            else:
+                form_category = form_category_sel
+            form_description  = st.text_input("Description", placeholder="e.g. Electricity bill March")
         with col2:
             form_amount = st.number_input("Amount (€)", min_value=0.0, step=10.0, format="%.2f")
             st.markdown("<br><br>", unsafe_allow_html=True)
             submit = st.button("Save Expense", type="primary", use_container_width=True)
 
         if submit:
-            if not form_description.strip():
+            if not form_category.strip():
+                st.error("Please enter a category name.")
+            elif not form_description.strip():
                 st.error("Please enter a description.")
             elif form_amount <= 0:
                 st.error("Amount must be greater than zero.")
             else:
-                success, message = add_expense(form_category, form_description.strip(), form_amount, form_month.replace(day=1))
+                normalised_desc     = form_description.strip().title()
+                normalised_category = form_category.strip().title()
+                success, message    = add_expense(
+                    normalised_category,
+                    normalised_desc,
+                    form_amount,
+                    form_month.replace(day=1)
+                )
                 if success:
                     st.success(message)
                     st.cache_data.clear()
