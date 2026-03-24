@@ -263,16 +263,45 @@ if page == "Home":
     deliveries       = load_supplier_data()
 
     st.subheader("Live Overview")
+
+    # Current and previous month
+    if txn is not None and not txn.empty:
+        all_months_home  = sorted(txn["month"].unique())
+        curr_m           = all_months_home[-1]
+        prev_m           = all_months_home[-2] if len(all_months_home) > 1 else None
+        curr_m_txn       = txn[txn["month"] == curr_m]
+        prev_m_txn       = txn[txn["month"] == prev_m] if prev_m else pd.DataFrame()
+
+        curr_rev  = float(curr_m_txn["total"].sum())
+        curr_cnt  = len(curr_m_txn)
+        curr_avg  = float(curr_m_txn["total"].mean())
+        prev_rev  = float(prev_m_txn["total"].sum())  if not prev_m_txn.empty else None
+        prev_cnt  = len(prev_m_txn)                   if not prev_m_txn.empty else None
+        prev_avg  = float(prev_m_txn["total"].mean()) if not prev_m_txn.empty else None
+
+        def home_delta(curr, prev):
+            if prev is None or prev == 0:
+                return None
+            return f"{((curr - prev) / prev * 100):+.1f}% vs {prev_m.strftime('%b')}"
+    else:
+        curr_rev = curr_cnt = curr_avg = None
+        prev_rev = prev_cnt = prev_avg = None
+        curr_m   = None
+
     k1, k2, k3, k4, k5 = st.columns(5)
 
-    if txn is not None and not txn.empty:
-        k1.metric("Total Revenue", f"€{txn['total'].sum():,.2f}")
-        k2.metric("Transactions",  f"{len(txn):,}")
-        k3.metric("Avg Check",     f"€{txn['total'].mean():.2f}")
+    if curr_rev is not None:
+        k1.metric(f"Revenue ({curr_m.strftime('%b %Y')})", f"€{curr_rev:,.2f}",
+                  delta=home_delta(curr_rev, prev_rev), delta_color="normal")
+        k2.metric("Transactions", f"{curr_cnt:,}",
+                  delta=f"{curr_cnt - prev_cnt:+,} vs {prev_m.strftime('%b')}" if prev_cnt is not None else None,
+                  delta_color="normal")
+        k3.metric("Avg Check", f"€{curr_avg:.2f}",
+                  delta=home_delta(curr_avg, prev_avg), delta_color="normal")
     else:
-        k1.metric("Total Revenue", "—")
-        k2.metric("Transactions",  "—")
-        k3.metric("Avg Check",     "—")
+        k1.metric("Revenue", "—")
+        k2.metric("Transactions", "—")
+        k3.metric("Avg Check", "—")
 
     if employees is not None and not employees.empty:
         k4.metric("Monthly Payroll", f"€{employees['monthly_salary'].sum():,.2f}")
@@ -281,7 +310,8 @@ if page == "Home":
 
     if deliveries is not None and not deliveries.empty:
         total_outstanding = float(deliveries[deliveries["paid"] == False]["amount"].sum())
-        k5.metric("Supplier Balance", f"€{total_outstanding:,.2f}", help="Total unpaid supplier deliveries")
+        k5.metric("Supplier Balance", f"€{total_outstanding:,.2f}",
+                  help="Total unpaid supplier deliveries")
     else:
         k5.metric("Supplier Balance", "—")
 
@@ -348,6 +378,21 @@ elif page == "Sales":
  
     with st.sidebar:
         st.header("Filters")
+
+        # Date range within the selected month
+        month_min = month_txn["date"].min()
+        month_max = month_txn["date"].max()
+        date_range = st.date_input(
+            "Date range",
+            value=(month_min, month_max),
+            min_value=month_min,
+            max_value=month_max,
+        )
+        if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+            date_start, date_end = date_range
+        else:
+            date_start = date_end = date_range
+
         all_servers = sorted(month_txn["server"].dropna().unique().tolist())
         selected_servers = st.multiselect("Servers", options=all_servers, default=all_servers)
         all_methods = sorted(month_txn["payment_method"].dropna().unique().tolist())
@@ -355,7 +400,12 @@ elif page == "Sales":
         st.divider()
         st.caption("Auto-refreshes every 30 s")
  
-    filtered_txn   = month_txn[month_txn["server"].isin(selected_servers) & month_txn["payment_method"].isin(selected_methods)]
+    filtered_txn   = month_txn[
+            (month_txn["date"] >= date_start)
+            & (month_txn["date"] <= date_end)
+            & month_txn["server"].isin(selected_servers)
+            & month_txn["payment_method"].isin(selected_methods)
+    ]    
     filtered_items = month_items[month_items["transaction_id"].isin(filtered_txn["transaction_id"])]
  
     if filtered_txn.empty:
