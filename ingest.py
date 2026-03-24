@@ -1,5 +1,5 @@
 """
-Ingestion script — fetch → clean → load into PostgreSQL.
+Ingestion script — fetch → filter by cursor → clean → load into PostgreSQL.
 
 Modes:
   python ingest.py          # run once immediately
@@ -80,6 +80,7 @@ def init_db(conn) -> None:
                 cleaned     INTEGER NOT NULL DEFAULT 0,
                 inserted    INTEGER NOT NULL DEFAULT 0,
                 skipped     INTEGER NOT NULL DEFAULT 0,
+                filtered    INTEGER NOT NULL DEFAULT 0,
                 status      TEXT    NOT NULL DEFAULT 'success',
                 error_msg   TEXT
             );
@@ -121,14 +122,16 @@ def init_db(conn) -> None:
 
 # ── Cursor ─────────────────────────────────────────────────────────────────────
 
-def get_cursor(conn) -> Optional[str]:
+def get_cursor(conn) -> Optional[datetime]:
+    """Return the last_seen datetime, or None if this is the first run."""
     with conn.cursor() as cur:
         cur.execute("SELECT last_seen FROM cursor_state WHERE id = 1")
         row = cur.fetchone()
-    return row[0].isoformat() if row else None
+    return row[0] if row else None
 
 
-def set_cursor(conn, timestamp: str) -> None:
+def set_cursor(conn, timestamp: datetime) -> None:
+    """Save the high-water mark."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO cursor_state (id, last_seen) VALUES (1, %s)
@@ -139,28 +142,62 @@ def set_cursor(conn, timestamp: str) -> None:
 
 # ── Pipeline run logging ───────────────────────────────────────────────────────
 
-def log_run(conn, run_at, fetched, cleaned, inserted, skipped,
+def log_run(conn, run_at, fetched, cleaned, inserted, skipped, filtered=0,
             status="success", error_msg=None):
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO pipeline_runs
-                (run_at, fetched, cleaned, inserted, skipped, status, error_msg)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (run_at, fetched, cleaned, inserted, skipped, status, error_msg))
+                (run_at, fetched, cleaned, inserted, skipped, filtered, status, error_msg)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (run_at, fetched, cleaned, inserted, skipped, filtered, status, error_msg))
     conn.commit()
 
 
 # ── Fetch ──────────────────────────────────────────────────────────────────────
 
 def fetch_sales(n: int) -> list[dict]:
+    """Fetch n transactions from the POS API."""
     resp = requests.get(POS_API_URL, params={"n": n}, timeout=10)
     resp.raise_for_status()
     return resp.json()["transactions"]
 
 
+# ── Filter by cursor ───────────────────────────────────────────────────────────
+
+def filter_by_cursor(raw: list[dict], cursor: Optional[datetime]) -> tuple[list[dict], int]:
+    """
+    Remove transactions whose timestamp is on or before the cursor.
+    Returns (filtered_list, count_removed).
+
+    This is the core of incremental ingestion — the cursor marks the
+    last timestamp we successfully processed. Anything older is skipped.
+    """
+    if cursor is None:
+        return raw, 0
+
+    filtered = []
+    removed  = 0
+    for r in raw:
+        try:
+            ts = datetime.fromisoformat(r["timestamp"])
+            if ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
+            cursor_naive = cursor.replace(tzinfo=None) if cursor.tzinfo else cursor
+
+            if ts > cursor_naive:
+                filtered.append(r)
+            else:
+                removed += 1
+        except (ValueError, KeyError):
+            filtered.append(r)
+
+    return filtered, removed
+
+
 # ── Clean ──────────────────────────────────────────────────────────────────────
 
 def clean_transaction(raw: dict) -> dict | None:
+    """Validate and normalise a raw transaction. Returns None if invalid."""
     required = {"transaction_id", "timestamp", "total", "items"}
     if not required.issubset(raw):
         log.warning("Skipping transaction missing fields: %s", raw.get("transaction_id"))
@@ -176,6 +213,27 @@ def clean_transaction(raw: dict) -> dict | None:
         log.warning("Skipping transaction with bad timestamp: %s", raw["transaction_id"])
         return None
 
+    # Validate items
+    if not isinstance(raw["items"], list) or len(raw["items"]) == 0:
+        log.warning("Skipping transaction with no items: %s", raw["transaction_id"])
+        return None
+
+    cleaned_items = []
+    for item in raw["items"]:
+        unit_price = item.get("unit_price", 0)
+        quantity   = item.get("quantity", 0)
+        if not isinstance(unit_price, (int, float)) or unit_price < 0:
+            log.warning("Skipping item with invalid price in %s", raw["transaction_id"])
+            continue
+        if not isinstance(quantity, int) or quantity <= 0:
+            log.warning("Skipping item with invalid quantity in %s", raw["transaction_id"])
+            continue
+        cleaned_items.append(item)
+
+    if not cleaned_items:
+        log.warning("Skipping transaction with no valid items: %s", raw["transaction_id"])
+        return None
+
     return {
         "transaction_id": raw["transaction_id"].strip(),
         "timestamp":      ts.isoformat(),
@@ -183,19 +241,25 @@ def clean_transaction(raw: dict) -> dict | None:
         "server":         raw.get("server", "").strip() or None,
         "total":          round(float(raw["total"]), 2),
         "payment_method": raw.get("payment_method", "").strip().lower() or None,
-        "items":          raw["items"],
+        "items":          cleaned_items,
     }
 
 
 # ── Load ───────────────────────────────────────────────────────────────────────
 
 def load_transactions(conn, transactions: list[dict]) -> int:
+    """Insert transactions atomically using savepoints.
+    Each transaction is wrapped in a savepoint so a single failure
+    does not roll back the entire batch.
+    """
     now      = datetime.now().isoformat()
     inserted = 0
 
     with conn.cursor() as cur:
         for txn in transactions:
             try:
+                cur.execute("SAVEPOINT txn_save")
+
                 cur.execute("""
                     INSERT INTO transactions
                         (transaction_id, timestamp, table_number, server,
@@ -208,6 +272,7 @@ def load_transactions(conn, transactions: list[dict]) -> int:
                 ))
 
                 if cur.rowcount == 0:
+                    cur.execute("RELEASE SAVEPOINT txn_save")
                     continue
 
                 for item in txn["items"]:
@@ -223,11 +288,14 @@ def load_transactions(conn, transactions: list[dict]) -> int:
                         item.get("quantity"),
                         item.get("subtotal"),
                     ))
+
+                cur.execute("RELEASE SAVEPOINT txn_save")
                 inserted += 1
 
             except psycopg2.Error as e:
-                log.error("DB error for %s: %s", txn["transaction_id"], e)
-                conn.rollback()
+                cur.execute("ROLLBACK TO SAVEPOINT txn_save")
+                log.error("DB error for %s: %s — rolled back to savepoint",
+                          txn["transaction_id"], e)
 
     conn.commit()
     return inserted
@@ -237,10 +305,11 @@ def load_transactions(conn, transactions: list[dict]) -> int:
 
 def run_pipeline() -> None:
     log.info("── Pipeline run starting ──")
-    run_at = datetime.now().isoformat()
+    run_at   = datetime.now()
+    filtered = 0
 
     try:
-        conn = get_connection()
+        conn   = get_connection()
         init_db(conn)
         cursor = get_cursor(conn)
         conn.close()
@@ -251,7 +320,7 @@ def run_pipeline() -> None:
     if cursor:
         log.info("Cursor found — last run at %s", cursor)
     else:
-        log.info("No cursor found — first run")
+        log.info("No cursor found — first run, accepting all transactions")
 
     try:
         raw = fetch_sales(TRANSACTIONS_PER_FETCH)
@@ -260,36 +329,43 @@ def run_pipeline() -> None:
         log.error("Failed to fetch from POS API: %s", e)
         conn = get_connection()
         log_run(conn, run_at, fetched=0, cleaned=0, inserted=0,
-                skipped=0, status="error", error_msg=str(e))
+                skipped=0, filtered=0, status="error", error_msg=str(e))
         conn.close()
         return
 
+    # Filter by cursor — only keep transactions newer than last run
+    raw, filtered = filter_by_cursor(raw, cursor)
+    if filtered > 0:
+        log.info("Cursor filtered out %d already-seen transactions", filtered)
+
+    # Clean
     cleaned = [c for r in raw if (c := clean_transaction(r)) is not None]
     log.info("Cleaned: %d valid / %d total", len(cleaned), len(raw))
 
     if not cleaned:
         log.info("Nothing new to insert — pipeline run complete\n")
         conn = get_connection()
-        log_run(conn, run_at, fetched=len(raw), cleaned=0,
-                inserted=0, skipped=0, status="success")
+        log_run(conn, run_at, fetched=TRANSACTIONS_PER_FETCH, cleaned=0,
+                inserted=0, skipped=0, filtered=filtered, status="success")
         conn.close()
         return
 
-    conn      = get_connection()
-    new_rows  = load_transactions(conn, cleaned)
-    skipped   = len(cleaned) - new_rows
+    # Load
+    conn     = get_connection()
+    new_rows = load_transactions(conn, cleaned)
+    skipped  = len(cleaned) - new_rows
 
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM transactions")
         total_rows = cur.fetchone()[0]
 
-    set_cursor(conn, datetime.now().isoformat())
-    log_run(conn, run_at, fetched=len(raw), cleaned=len(cleaned),
-            inserted=new_rows, skipped=skipped, status="success")
+    set_cursor(conn, run_at)
+    log_run(conn, run_at, fetched=TRANSACTIONS_PER_FETCH, cleaned=len(cleaned),
+            inserted=new_rows, skipped=skipped, filtered=filtered, status="success")
     conn.close()
 
-    log.info("Inserted %d new rows  |  Skipped %d duplicates  |  DB total: %d",
-             new_rows, skipped, total_rows)
+    log.info("Inserted %d new rows  |  Skipped %d duplicates  |  Filtered %d by cursor  |  DB total: %d",
+             new_rows, skipped, filtered, total_rows)
     log.info("── Pipeline run complete ──\n")
 
 
@@ -307,16 +383,13 @@ if __name__ == "__main__":
     if args.schedule:
         log.info("Scheduler mode: running at :30 past each hour from 08:30 to 16:30.")
         scheduler = BlockingScheduler()
-
-        # Fire at 08:30, 09:30, 10:30, 11:30, 12:30, 13:30, 14:30, 15:30, 16:30
         scheduler.add_job(
             run_pipeline,
             "cron",
             hour="8-16",
             minute="30",
         )
-
-        run_pipeline()  # run immediately on start
+        run_pipeline()
         try:
             scheduler.start()
         except KeyboardInterrupt:
