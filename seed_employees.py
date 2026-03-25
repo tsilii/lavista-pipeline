@@ -12,15 +12,23 @@ import psycopg2
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 EMPLOYEES = [
-    {"name": "Alice",  "role": "Senior Waiter",  "monthly_salary": 1800.00, "start_date": "2023-01-15", "active": True},
-    {"name": "Bob",    "role": "Waiter",          "monthly_salary": 1500.00, "start_date": "2023-03-01", "active": True},
-    {"name": "Carlos", "role": "Waiter",          "monthly_salary": 1500.00, "start_date": "2023-06-01", "active": True},
-    {"name": "Diana",  "role": "Senior Waiter",   "monthly_salary": 1800.00, "start_date": "2022-09-01", "active": True},
-    {"name": "Marco",  "role": "Head Chef",       "monthly_salary": 2500.00, "start_date": "2022-01-01", "active": True},
-    {"name": "Sofia",  "role": "Sous Chef",       "monthly_salary": 2000.00, "start_date": "2022-06-15", "active": True},
-    {"name": "Luca",   "role": "Kitchen Staff",   "monthly_salary": 1400.00, "start_date": "2023-09-01", "active": True},
-    {"name": "Elena",  "role": "Manager",         "monthly_salary": 3000.00, "start_date": "2021-05-01", "active": True},
+    {"name": "Γιάννης",     "role": "Σεφ",            "monthly_salary": 3000.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Ανδρέας",     "role": "Μάγειρας",       "monthly_salary": 1900.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Άντρα",       "role": "Μαγείρισσα",     "monthly_salary": 2000.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Σακίρα",      "role": "Μάγειρας",       "monthly_salary": 1600.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Ουράνια",     "role": "Μαγείρισσα",     "monthly_salary": 1700.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Executive",   "role": "Chef",           "monthly_salary": 700.00,  "start_date": "2023-03-01", "active": True},
+
+    {"name": "Άννα",        "role": "Σέρβις",         "monthly_salary": 1600.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Γκερντούδη",  "role": "Σέρβις",         "monthly_salary": 1650.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Κωνσταντίνα", "role": "Σέρβις",         "monthly_salary": 1800.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Γκίκα",       "role": "Σέρβις",         "monthly_salary": 1700.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Βασίλη Ποπόβ","role": "Σέρβις",         "monthly_salary": 1700.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Μιχαέλα",     "role": "Σέρβις",         "monthly_salary": 1400.00, "start_date": "2023-03-01", "active": True},
+
+    {"name": "Unknown",     "role": "Μπάρμαν",        "monthly_salary": 1600.00, "start_date": "2023-03-01", "active": True},
 ]
+
 
 
 def seed():
