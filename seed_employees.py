@@ -12,21 +12,22 @@ import psycopg2
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 EMPLOYEES = [
+    {"name": "Νίκος",       "role": "Σεφ",            "monthly_salary": 5830.00, "start_date": "2023-03-01", "active": True},
     {"name": "Γιάννης",     "role": "Σεφ",            "monthly_salary": 3000.00, "start_date": "2023-03-01", "active": True},
     {"name": "Ανδρέας",     "role": "Μάγειρας",       "monthly_salary": 1900.00, "start_date": "2023-03-01", "active": True},
     {"name": "Άντρα",       "role": "Μαγείρισσα",     "monthly_salary": 2000.00, "start_date": "2023-03-01", "active": True},
     {"name": "Σακίρα",      "role": "Μάγειρας",       "monthly_salary": 1600.00, "start_date": "2023-03-01", "active": True},
-    {"name": "Ουράνια",     "role": "Μαγείρισσα",     "monthly_salary": 1700.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Ουράνια",     "role": "Μαγείρισσα",     "monthly_salary": 2100.00, "start_date": "2023-03-01", "active": True},
     {"name": "Executive",   "role": "Chef",           "monthly_salary": 700.00,  "start_date": "2023-03-01", "active": True},
 
-    {"name": "Άννα",        "role": "Σέρβις",         "monthly_salary": 1600.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Μιχαέλα",     "role": "Σέρβις",         "monthly_salary": 1400.00, "start_date": "2023-03-01", "active": True},
     {"name": "Γκερντούδη",  "role": "Σέρβις",         "monthly_salary": 1650.00, "start_date": "2023-03-01", "active": True},
     {"name": "Κωνσταντίνα", "role": "Σέρβις",         "monthly_salary": 1800.00, "start_date": "2023-03-01", "active": True},
     {"name": "Γκίκα",       "role": "Σέρβις",         "monthly_salary": 1700.00, "start_date": "2023-03-01", "active": True},
     {"name": "Βασίλη Ποπόβ","role": "Σέρβις",         "monthly_salary": 1700.00, "start_date": "2023-03-01", "active": True},
     {"name": "Μιχαέλα",     "role": "Σέρβις",         "monthly_salary": 1400.00, "start_date": "2023-03-01", "active": True},
 
-    {"name": "Unknown",     "role": "Μπάρμαν",        "monthly_salary": 1600.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Γιωργος",     "role": "Μπάρμαν",        "monthly_salary": 1600.00, "start_date": "2023-03-01", "active": True},
 ]
 
 

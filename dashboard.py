@@ -8,10 +8,37 @@ from datetime import date
 import pandas as pd
 import psycopg2
 import streamlit as st
-
-DATABASE_URL = os.getenv("DATABASE_URL")
+import os
+import streamlit as st
 
 st.set_page_config(page_title="Sova Bistrot", layout="wide", page_icon="🦉")
+
+
+# Password protection
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "SET_PASSWORD_IN_RAILWAY")
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title("🦉 Sova Bistrot — Dashboard Access")
+    password_input = st.text_input("Enter password:", type="password")
+    if st.button("Login"):
+        if password_input == DASHBOARD_PASSWORD:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password")
+    st.stop()
+
+# Rest of your dashboard code continues here...
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+
+
+
+
 
 OWL_SVG = """
 <svg width="160" height="160" viewBox="0 0 680 320" xmlns="http://www.w3.org/2000/svg">
