@@ -267,6 +267,41 @@ def confirm_pending(conn, pending_id: int) -> None:
     conn.commit()
 
 
+
+# ── Inventory: add stock on delivery ──────────────────────────────────────────
+
+def update_inventory_for_delivery(conn, delivery_id: int, items: list[dict]) -> None:
+    """
+    For each delivery item, upsert into inventory_items and record an 'in' movement.
+    If the item does not exist yet, it is created automatically.
+    """
+    with conn.cursor() as cur:
+        for item in items:
+            name = (item.get("description") or "").strip()
+            qty  = float(item.get("quantity") or 0)
+            if not name or qty <= 0:
+                continue
+
+            cur.execute("""
+                INSERT INTO inventory_items (name, quantity, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (name) DO UPDATE SET
+                    quantity   = inventory_items.quantity + EXCLUDED.quantity,
+                    updated_at = NOW()
+                RETURNING id
+            """, (name, qty))
+
+            item_id = cur.fetchone()[0]
+
+            cur.execute("""
+                INSERT INTO inventory_movements
+                    (item_id, movement_type, quantity, source, source_id, note)
+                VALUES (%s, 'in', %s, 'delivery', %s, %s)
+            """, (item_id, qty, delivery_id, f"Delivery #{delivery_id}"))
+
+    conn.commit()
+
+
 # ── Save confirmed delivery ────────────────────────────────────────────────────
 
 def save_delivery(conn, data: dict) -> int:
