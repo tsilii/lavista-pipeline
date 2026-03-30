@@ -73,6 +73,31 @@ def init_invoice_tables(conn) -> None:
             );
         """)
 
+        # Inventory tables — created here so they exist as soon as the webhook runs.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_items (
+                id                  SERIAL PRIMARY KEY,
+                name                TEXT    UNIQUE NOT NULL,
+                unit                TEXT    NOT NULL DEFAULT 'pieces',
+                quantity            NUMERIC(10, 3) NOT NULL DEFAULT 0,
+                reorder_threshold   NUMERIC(10, 3) NOT NULL DEFAULT 0,
+                updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_movements (
+                id              SERIAL PRIMARY KEY,
+                item_id         INTEGER NOT NULL
+                    REFERENCES inventory_items(id) ON DELETE CASCADE,
+                movement_type   TEXT    NOT NULL CHECK (movement_type IN ('in', 'out')),
+                quantity        NUMERIC(10, 3) NOT NULL,
+                source          TEXT    NOT NULL CHECK (source IN ('delivery', 'sale', 'manual')),
+                source_id       INTEGER,
+                note            TEXT,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+
     conn.commit()
     log.info("Invoice tables ready.")
 
