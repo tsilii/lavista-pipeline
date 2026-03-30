@@ -26,8 +26,12 @@ EMPLOYEES = [
     {"name": "Γκίκα",       "role": "Σέρβις",         "monthly_salary": 1700.00, "start_date": "2023-03-01", "active": True},
     {"name": "Βασίλη Ποπόβ","role": "Σέρβις",         "monthly_salary": 1700.00, "start_date": "2023-03-01", "active": True},
     {"name": "Μιχαέλα",     "role": "Σέρβις",         "monthly_salary": 1400.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Κωνσταντίνα", "role": "Σέρβις-Σομελιέ", "monthly_salary": 1800.00, "start_date": "2023-03-01", "active": True},
+    {"name": "Ντάνι",       "role": "Βοηθός-Σέρβις",  "monthly_salary": 1150.00, "start_date": "2023-03-01", "active": True},
 
-    {"name": "Γιωργος",     "role": "Μπάρμαν",        "monthly_salary": 1600.00, "start_date": "2023-03-01", "active": True},
+
+
+    {"name": "Βαλάντης",     "role": "Μπάρμαν",        "monthly_salary": 1600.00, "start_date": "2023-03-01", "active": True},
 ]
 
 
