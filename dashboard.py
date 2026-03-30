@@ -1012,8 +1012,179 @@ elif page == "Suppliers":
 
 elif page == "Inventory":
     st.title("Sova Bistrot — Inventory")
-    st.info("Inventory page coming soon.")
 
+    @st.cache_data(ttl=15)
+    def load_inventory():
+        conn = get_conn()
+        if not conn:
+            return None, None
+        try:
+            items = pd.read_sql("""
+                SELECT id, name, unit, quantity, reorder_threshold, updated_at
+                FROM inventory_items
+                ORDER BY name
+            """, conn)
+            movements = pd.read_sql("""
+                SELECT m.id, i.name, m.movement_type, m.quantity,
+                       m.source, m.note, m.created_at
+                FROM inventory_movements m
+                JOIN inventory_items i ON i.id = m.item_id
+                ORDER BY m.created_at DESC
+                LIMIT 100
+            """, conn)
+            return items, movements
+        except Exception:
+            return None, None
+        finally:
+            conn.close()
+
+    items, movements = load_inventory()
+
+    if items is None or items.empty:
+        st.info("No inventory data yet. Confirm a delivery via WhatsApp to populate inventory automatically.")
+        st.stop()
+
+    total_items  = len(items)
+    low_stock    = items[items["quantity"] <= items["reorder_threshold"]]
+    out_of_stock = items[items["quantity"] == 0]
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total Items Tracked", total_items)
+    k2.metric("Low Stock Alerts", len(low_stock),
+              delta=f"{len(low_stock)} need restocking" if len(low_stock) > 0 else None,
+              delta_color="inverse")
+    k3.metric("Out of Stock", len(out_of_stock),
+              delta="Needs immediate attention" if len(out_of_stock) > 0 else None,
+              delta_color="inverse")
+
+    st.divider()
+    st.subheader("Current Stock Levels")
+
+    def stock_status(row):
+        if row["quantity"] == 0:
+            return "🔴 Out of stock"
+        elif row["quantity"] <= row["reorder_threshold"] and row["reorder_threshold"] > 0:
+            return "🟡 Low stock"
+        else:
+            return "🟢 OK"
+
+    display = items.copy()
+    display["Status"]            = display.apply(stock_status, axis=1)
+    display["quantity"]          = display["quantity"].apply(lambda x: f"{float(x):,.2f}")
+    display["reorder_threshold"] = display["reorder_threshold"].apply(lambda x: f"{float(x):,.2f}")
+    display["updated_at"]        = pd.to_datetime(display["updated_at"]).dt.strftime("%Y-%m-%d %H:%M")
+
+    st.dataframe(
+        display[["name", "unit", "quantity", "reorder_threshold", "Status", "updated_at"]]
+        .rename(columns={
+            "name":              "Item",
+            "unit":              "Unit",
+            "quantity":          "In Stock",
+            "reorder_threshold": "Reorder At",
+            "updated_at":        "Last Updated",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+    st.subheader("Manual Stock Adjustment")
+    st.caption("Use this to correct stock counts or record waste.")
+
+    col1, col2, col3 = st.columns(3)
+    item_names = items["name"].tolist()
+    with col1:
+        selected_item = st.selectbox("Item", options=item_names)
+    with col2:
+        adj_type = st.selectbox("Adjustment", options=["Add stock (+)", "Remove stock (-)"])
+    with col3:
+        adj_qty = st.number_input("Quantity", min_value=0.0, step=1.0, format="%.2f")
+
+    adj_note = st.text_input("Note (optional)", placeholder="e.g. Stock count correction, waste")
+
+    if st.button("Apply Adjustment", type="primary"):
+        if adj_qty <= 0:
+            st.error("Quantity must be greater than zero.")
+        else:
+            conn = get_conn()
+            try:
+                item_row = items[items["name"] == selected_item].iloc[0]
+                item_id  = int(item_row["id"])
+                current  = float(str(item_row["quantity"]).replace(",", ""))
+                movement = "in" if "Add" in adj_type else "out"
+                new_qty  = current + adj_qty if movement == "in" else max(0, current - adj_qty)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE inventory_items SET quantity = %s, updated_at = NOW() WHERE id = %s",
+                        (new_qty, item_id)
+                    )
+                    cur.execute("""
+                        INSERT INTO inventory_movements (item_id, movement_type, quantity, source, note)
+                        VALUES (%s, %s, %s, 'manual', %s)
+                    """, (item_id, movement, adj_qty, adj_note or "Manual adjustment"))
+                conn.commit()
+                st.success(f"Updated {selected_item}: {current:,.2f} → {new_qty:,.2f} {item_row['unit']}")
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                conn.rollback()
+                st.error(f"Error: {e}")
+            finally:
+                conn.close()
+
+    st.divider()
+    st.subheader("Set Reorder Thresholds")
+    st.caption("Get a low stock alert when an item falls below this level.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        threshold_item = st.selectbox("Item", options=item_names, key="threshold_item")
+    with col_b:
+        current_threshold = float(items[items["name"] == threshold_item]["reorder_threshold"].iloc[0])
+        new_threshold = st.number_input(
+            "Alert when stock falls below",
+            min_value=0.0, value=current_threshold, step=1.0, format="%.2f"
+        )
+
+    if st.button("Save Threshold", type="primary"):
+        conn = get_conn()
+        try:
+            item_id = int(items[items["name"] == threshold_item]["id"].iloc[0])
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE inventory_items SET reorder_threshold = %s WHERE id = %s",
+                    (new_threshold, item_id)
+                )
+            conn.commit()
+            st.success(f"Threshold for {threshold_item} set to {new_threshold:,.2f}")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as e:
+            conn.rollback()
+            st.error(f"Error: {e}")
+        finally:
+            conn.close()
+
+    st.divider()
+    st.subheader("Recent Stock Movements")
+    if movements is not None and not movements.empty:
+        movements["created_at"]    = pd.to_datetime(movements["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
+        movements["movement_type"] = movements["movement_type"].map({"in": "📦 IN", "out": "🛒 OUT"})
+        st.dataframe(
+            movements[["created_at", "name", "movement_type", "quantity", "source", "note"]]
+            .rename(columns={
+                "created_at":    "Time",
+                "name":          "Item",
+                "movement_type": "Type",
+                "quantity":      "Qty",
+                "source":        "Source",
+                "note":          "Note",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No movements recorded yet.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: P&L

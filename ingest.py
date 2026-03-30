@@ -117,6 +117,29 @@ def init_db(conn) -> None:
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_items (
+                id                  SERIAL PRIMARY KEY,
+                name                TEXT    UNIQUE NOT NULL,
+                unit                TEXT    NOT NULL DEFAULT 'pieces',
+                quantity            NUMERIC(10, 3) NOT NULL DEFAULT 0,
+                reorder_threshold   NUMERIC(10, 3) NOT NULL DEFAULT 0,
+                updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_movements (
+                id              SERIAL PRIMARY KEY,
+                item_id         INTEGER NOT NULL
+                    REFERENCES inventory_items(id) ON DELETE CASCADE,
+                movement_type   TEXT    NOT NULL CHECK (movement_type IN ('in', 'out')),
+                quantity        NUMERIC(10, 3) NOT NULL,
+                source          TEXT    NOT NULL CHECK (source IN ('delivery', 'sale', 'manual')),
+                source_id       INTEGER,
+                note            TEXT,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
     conn.commit()
 
 
@@ -168,9 +191,6 @@ def filter_by_cursor(raw: list[dict], cursor: Optional[datetime]) -> tuple[list[
     """
     Remove transactions whose timestamp is on or before the cursor.
     Returns (filtered_list, count_removed).
-
-    This is the core of incremental ingestion — the cursor marks the
-    last timestamp we successfully processed. Anything older is skipped.
     """
     if cursor is None:
         return raw, 0
@@ -213,7 +233,6 @@ def clean_transaction(raw: dict) -> dict | None:
         log.warning("Skipping transaction with bad timestamp: %s", raw["transaction_id"])
         return None
 
-    # Validate items
     if not isinstance(raw["items"], list) or len(raw["items"]) == 0:
         log.warning("Skipping transaction with no items: %s", raw["transaction_id"])
         return None
@@ -245,13 +264,54 @@ def clean_transaction(raw: dict) -> dict | None:
     }
 
 
+# ── Inventory: deduct stock on sale ───────────────────────────────────────────
+
+def deduct_inventory_for_sale(conn, transaction_id: str, items: list[dict]) -> None:
+    """
+    For each sold item, if it exists in inventory_items (1-1 match by name),
+    deduct the quantity sold and record the movement.
+    Non-matching items are silently skipped.
+    """
+    with conn.cursor() as cur:
+        for item in items:
+            name = item.get("name", "").strip()
+            qty  = item.get("quantity", 0)
+            if not name or not qty:
+                continue
+
+            # Case-insensitive match against inventory
+            cur.execute("""
+                SELECT id, quantity FROM inventory_items
+                WHERE LOWER(name) = LOWER(%s)
+            """, (name,))
+            row = cur.fetchone()
+
+            if not row:
+                continue  # item not tracked in inventory — skip
+
+            item_id      = row[0]
+            current_qty  = float(row[1])
+            new_qty      = max(0, current_qty - qty)  # floor at 0, never go negative
+
+            cur.execute("""
+                UPDATE inventory_items
+                SET quantity = %s, updated_at = NOW()
+                WHERE id = %s
+            """, (new_qty, item_id))
+
+            cur.execute("""
+                INSERT INTO inventory_movements
+                    (item_id, movement_type, quantity, source, source_id, note)
+                VALUES (%s, 'out', %s, 'sale', NULL, %s)
+            """, (item_id, qty, f"Sale {transaction_id}"))
+
+    conn.commit()
+
+
 # ── Load ───────────────────────────────────────────────────────────────────────
 
 def load_transactions(conn, transactions: list[dict]) -> int:
-    """Insert transactions atomically using savepoints.
-    Each transaction is wrapped in a savepoint so a single failure
-    does not roll back the entire batch.
-    """
+    """Insert transactions atomically using savepoints."""
     now      = datetime.now().isoformat()
     inserted = 0
 
@@ -298,6 +358,14 @@ def load_transactions(conn, transactions: list[dict]) -> int:
                           txn["transaction_id"], e)
 
     conn.commit()
+
+    # Deduct inventory for newly inserted transactions
+    for txn in transactions:
+        try:
+            deduct_inventory_for_sale(conn, txn["transaction_id"], txn["items"])
+        except Exception as e:
+            log.error("Inventory deduction failed for %s: %s", txn["transaction_id"], e)
+
     return inserted
 
 
@@ -333,12 +401,10 @@ def run_pipeline() -> None:
         conn.close()
         return
 
-    # Filter by cursor — only keep transactions newer than last run
     raw, filtered = filter_by_cursor(raw, cursor)
     if filtered > 0:
         log.info("Cursor filtered out %d already-seen transactions", filtered)
 
-    # Clean
     cleaned = [c for r in raw if (c := clean_transaction(r)) is not None]
     log.info("Cleaned: %d valid / %d total", len(cleaned), len(raw))
 
@@ -350,7 +416,6 @@ def run_pipeline() -> None:
         conn.close()
         return
 
-    # Load
     conn     = get_connection()
     new_rows = load_transactions(conn, cleaned)
     skipped  = len(cleaned) - new_rows

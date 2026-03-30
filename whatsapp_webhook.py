@@ -409,6 +409,7 @@ async def whatsapp_webhook(
     if body_text in CONFIRM_WORDS:
         try:
             delivery_id = save_delivery(conn, pending["data"])
+            update_inventory_for_delivery(conn, delivery_id, pending["data"].get("items") or [])
             confirm_pending(conn, pending["id"])
             conn.close()
             supplier = pending["data"].get("supplier_name") or "supplier"
