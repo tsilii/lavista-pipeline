@@ -16,6 +16,7 @@ import json
 import logging
 import os
 from datetime import datetime
+from typing import Optional
 
 import anthropic
 import psycopg2
@@ -346,11 +347,11 @@ CANCEL_WORDS  = {"no",  "cancel", "no", "όχι", "oxi", "discard", "n"}
 
 @router.post("/whatsapp", response_class=PlainTextResponse)
 async def whatsapp_webhook(
-    From:              str = Form(...),
-    Body:              str = Form(default=""),
-    NumMedia:          int = Form(default=0),
-    MediaUrl0:         str = Form(default=None),
-    MediaContentType0: str = Form(default="image/jpeg"),
+    From:              str           = Form(...),
+    Body:              str           = Form(default=""),
+    NumMedia:          Optional[str] = Form(default="0"),
+    MediaUrl0:         Optional[str] = Form(default=None),
+    MediaContentType0: Optional[str] = Form(default="image/jpeg"),
 ):
     """
     Twilio calls this endpoint every time a WhatsApp message arrives.
@@ -359,10 +360,11 @@ async def whatsapp_webhook(
       1. Message contains an image → extract invoice, store pending, reply with summary
       2. Message is text → check if it's a confirmation or cancellation of a pending invoice
     """
-    from_number = From.strip()
-    body_text   = Body.strip().lower()
+    from_number  = From.strip()
+    body_text    = Body.strip().lower()
+    num_media    = int(NumMedia or "0")
 
-    log.info("WhatsApp message from %s | media=%d | body='%s'", from_number, NumMedia, Body[:50])
+    log.info("WhatsApp message from %s | media=%s | body='%s'", from_number, num_media, Body[:50])
 
     try:
         conn = get_conn()
@@ -372,7 +374,7 @@ async def whatsapp_webhook(
         return twiml_reply("⚠️ System error — please try again in a moment.")
 
     # ── Case 1: Image received → extract and store as pending ─────────────────
-    if NumMedia > 0 and MediaUrl0:
+    if num_media > 0 and MediaUrl0:
         result = download_twilio_image(MediaUrl0)
         if not result:
             conn.close()
@@ -380,7 +382,6 @@ async def whatsapp_webhook(
 
         image_bytes, content_type = result
         log.info("Downloaded image — %d bytes — %s", len(image_bytes), content_type)
-
         extracted = extract_invoice_data(image_bytes, content_type)
         if not extracted:
             conn.close()
