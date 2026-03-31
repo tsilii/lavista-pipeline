@@ -21,8 +21,9 @@ from typing import Optional
 import anthropic
 import psycopg2
 import requests
-from fastapi import APIRouter, Form
+from fastapi import APIRouter, BackgroundTasks, Form
 from fastapi.responses import PlainTextResponse
+from twilio.rest import Client as TwilioClient
 
 log = logging.getLogger(__name__)
 
@@ -394,6 +395,23 @@ def twiml_reply(message: str) -> PlainTextResponse:
     return PlainTextResponse(content=xml, media_type="application/xml")
 
 
+def send_whatsapp_message(to: str, message: str) -> None:
+    """
+    Send a WhatsApp message via Twilio REST API.
+    Used for background task responses that happen after Twilio's 15s timeout.
+    """
+    try:
+        client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.messages.create(
+            from_="whatsapp:+14155238886",
+            to=to,
+            body=message,
+        )
+        log.info("Sent background WhatsApp message to %s", to)
+    except Exception as e:
+        log.error("Failed to send WhatsApp message to %s: %s", to, e)
+
+
 # ── Format summary for WhatsApp ────────────────────────────────────────────────
 
 def format_summary(data: dict) -> str:
@@ -434,11 +452,55 @@ def format_summary(data: dict) -> str:
 # ── Webhook endpoint ───────────────────────────────────────────────────────────
 
 CONFIRM_WORDS = {"yes", "ναι", "nai", "✅", "y", "confirm", "ok", "okay", "ок"}
-CANCEL_WORDS  = {"no",  "cancel", "no", "όχι", "oxi", "discard", "n"}
+CANCEL_WORDS  = {"no",  "cancel", "όχι", "oxi", "discard", "n"}
+
+
+def process_invoice_background(from_number: str, media_url: str, content_type: str) -> None:
+    """
+    Background task — runs after Twilio's 15s window has closed.
+    Downloads image, extracts with Claude, stores as pending, sends result via Twilio API.
+    """
+    log.info("Background extraction starting for %s", from_number)
+
+    result = download_twilio_image(media_url)
+    if not result:
+        send_whatsapp_message(from_number,
+            "❌ Could not download the image. Please try sending it again.")
+        return
+
+    image_bytes, detected_type = result
+    log.info("Downloaded image — %d bytes — %s", len(image_bytes), detected_type)
+
+    extracted = extract_invoice_data(image_bytes, content_type)
+    if not extracted:
+        send_whatsapp_message(from_number,
+            "❌ Could not read the invoice. "
+            "Please make sure the photo is clear and well-lit, then try again.")
+        return
+
+    if extracted.get("_overloaded"):
+        send_whatsapp_message(from_number,
+            "⏳ The system is busy right now. Please send the photo again in a moment.")
+        return
+
+    try:
+        conn = get_conn()
+        init_invoice_tables(conn)
+        store_pending(conn, from_number, extracted)
+        conn.close()
+    except Exception as e:
+        log.error("DB error in background task: %s", e)
+        send_whatsapp_message(from_number, "⚠️ System error — please try again.")
+        return
+
+    summary = format_summary(extracted)
+    send_whatsapp_message(from_number, summary)
+    log.info("Background extraction complete for %s", from_number)
 
 
 @router.post("/whatsapp", response_class=PlainTextResponse)
 async def whatsapp_webhook(
+    background_tasks:  BackgroundTasks,
     From:              str           = Form(...),
     Body:              str           = Form(default=""),
     NumMedia:          Optional[str] = Form(default="0"),
@@ -449,15 +511,26 @@ async def whatsapp_webhook(
     Twilio calls this endpoint every time a WhatsApp message arrives.
 
     Two cases:
-      1. Message contains an image → extract invoice, store pending, reply with summary
-      2. Message is text → check if it's a confirmation or cancellation of a pending invoice
+      1. Image → reply instantly to Twilio, extract in background, send result via API
+      2. Text  → check for confirmation or cancellation of a pending invoice
     """
-    from_number  = From.strip()
-    body_text    = Body.strip().lower()
-    num_media    = int(NumMedia or "0")
+    from_number = From.strip()
+    body_text   = Body.strip().lower()
+    num_media   = int(NumMedia or "0")
 
     log.info("WhatsApp message from %s | media=%s | body='%s'", from_number, num_media, Body[:50])
 
+    # ── Case 1: Image received → reply immediately, process in background ─────
+    if num_media > 0 and MediaUrl0:
+        background_tasks.add_task(
+            process_invoice_background,
+            from_number,
+            MediaUrl0,
+            MediaContentType0 or "image/jpeg",
+        )
+        return twiml_reply("📸 Got your invoice! Reading it now, I'll message you back in a moment...")
+
+    # ── Case 2: Text message → confirmation or cancellation ───────────────────
     try:
         conn = get_conn()
         init_invoice_tables(conn)
@@ -465,36 +538,6 @@ async def whatsapp_webhook(
         log.error("DB connection failed: %s", e)
         return twiml_reply("⚠️ System error — please try again in a moment.")
 
-    # ── Case 1: Image received → extract and store as pending ─────────────────
-    if num_media > 0 and MediaUrl0:
-        result = download_twilio_image(MediaUrl0)
-        if not result:
-            conn.close()
-            return twiml_reply("❌ Could not download the image. Please try sending it again.")
-
-        image_bytes, content_type = result
-        log.info("Downloaded image — %d bytes — %s", len(image_bytes), content_type)
-        extracted = extract_invoice_data(image_bytes, content_type)
-        if not extracted:
-            conn.close()
-            return twiml_reply(
-                "❌ Could not read the invoice. "
-                "Please make sure the photo is clear and well-lit, then try again."
-            )
-        if extracted.get("_overloaded"):
-            conn.close()
-            return twiml_reply(
-                "⏳ The system is busy right now.\n\n"
-                "Please send the photo again in a moment."
-            )
-
-        store_pending(conn, from_number, extracted)
-        conn.close()
-
-        summary = format_summary(extracted)
-        return twiml_reply(summary)
-
-    # ── Case 2: Text message → check for confirmation or cancellation ─────────
     pending = get_pending(conn, from_number)
 
     if not pending:
@@ -532,7 +575,7 @@ async def whatsapp_webhook(
         conn.close()
         return twiml_reply("🗑️ Invoice discarded. Send a new photo when ready.")
 
-    # Unrecognised text while a pending invoice exists — remind the owner
+    # Unrecognised text while a pending invoice exists
     conn.close()
     return twiml_reply(
         "Reply *yes* to save or *no* to discard the last invoice.\n"
