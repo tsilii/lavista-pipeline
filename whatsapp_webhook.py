@@ -120,6 +120,7 @@ Required JSON format:
     {
       "description": "string",
       "quantity": number,
+      "unit": "string",
       "unit_price": number,
       "subtotal": number
     }
@@ -147,6 +148,17 @@ TOTAL rules:
 
 LINE ITEM rules:
 - Extract every product row from the main table.
+- unit: extract from the U/M or unit column. Normalize as follows:
+    κιλ / kg / kilo / κιλά → "kg"
+    τεμ / τεμάχιο / pcs / pieces / each → "pcs"
+    λίτρο / λίτρα / L / liter / litre → "L"
+    ml / milliliter → "ml"
+    γρ / gr / gram / γραμμάρια → "gr"
+    If no unit column exists or unit is unclear, use "pcs" as default.
+    If the quantity column contains a combined value like "2kg", "500gr", "1.5L",
+    split them: quantity = the number, unit = the unit suffix (normalized).
+    If the description contains a size like "500GR" or "80GR" or "1L",
+    this is the pack size — keep the U/M column unit for tracking (e.g. pcs).
 - description: product name always in Greek. If the name is in English or Latin characters (e.g. "rigani", "RIGANI", "tomatoes"), translate or transliterate it to the standard Greek name (e.g. "Ριγανη", "Ντοματες"). If you are unsure of the Greek name, keep the original. Always use Title Case (first letter capital, rest lowercase).
 - quantity: the QTY or Ποσότητα column value.
 - unit_price: the Price or Τιμή column value.
@@ -303,35 +315,71 @@ def confirm_pending(conn, pending_id: int) -> None:
 
 # ── Inventory: add stock on delivery ──────────────────────────────────────────
 
+# Unit normalization map — handles Greek and English variants
+UNIT_MAP = {
+    # Weight
+    "κιλ": "kg", "κιλά": "kg", "kilo": "kg", "kg": "kg",
+    "gr": "gr", "γρ": "gr", "gram": "gr", "grams": "gr",
+    "γραμμάρια": "gr", "γραμμάριο": "gr",
+    "500gr": "gr", "250gr": "gr", "100gr": "gr", "80gr": "gr",
+    # Volume
+    "λίτρο": "L", "λίτρα": "L", "liter": "L", "litre": "L",
+    "l": "L", "lt": "L", "λτ": "L",
+    "ml": "ml", "milliliter": "ml", "millilitre": "ml",
+    "1l": "L", "2l": "L", "5l": "L",
+    # Pieces
+    "τεμ": "pcs", "τεμάχιο": "pcs", "τεμάχια": "pcs",
+    "pcs": "pcs", "pieces": "pcs", "each": "pcs", "piece": "pcs",
+    "τμχ": "pcs", "τχ": "pcs",
+    # Boxes / packs
+    "box": "box", "boxes": "box", "κιβ": "box", "κιβώτιο": "box",
+    "pack": "pack", "packs": "pack", "pkg": "pack",
+    # Bunches
+    "bunch": "bunch", "ματσάκι": "bunch", "ματσάκια": "bunch",
+}
+
+def normalize_unit(raw_unit: str) -> str:
+    """Normalize a raw unit string to a standard form."""
+    if not raw_unit:
+        return "pcs"
+    cleaned = raw_unit.strip().lower()
+    return UNIT_MAP.get(cleaned, raw_unit.strip())
+
+
 def update_inventory_for_delivery(conn, delivery_id: int, items: list[dict]) -> None:
     """
     For each delivery item, upsert into inventory_items and record an 'in' movement.
-    If the item does not exist yet, it is created automatically.
+    - Name normalized to Title Case for consistent matching across suppliers/languages
+    - Unit extracted and normalized (kg, pcs, L etc.)
+    - If item already exists, quantity is added and unit is preserved from first delivery
     """
     with conn.cursor() as cur:
         for item in items:
-            # Normalize to Title Case — "RIGANI", "rigani", "Rigani" all become "Rigani"
             name = (item.get("description") or "").strip().title()
             qty  = float(item.get("quantity") or 0)
+            unit = normalize_unit(item.get("unit") or "pcs")
             if not name or qty <= 0:
                 continue
 
+            # Upsert — on conflict update quantity but preserve the existing unit
+            # so the first delivery sets the unit and subsequent ones respect it
             cur.execute("""
-                INSERT INTO inventory_items (name, quantity, updated_at)
-                VALUES (%s, %s, NOW())
+                INSERT INTO inventory_items (name, unit, quantity, updated_at)
+                VALUES (%s, %s, %s, NOW())
                 ON CONFLICT (name) DO UPDATE SET
                     quantity   = inventory_items.quantity + EXCLUDED.quantity,
                     updated_at = NOW()
-                RETURNING id
-            """, (name, qty))
+                RETURNING id, unit
+            """, (name, unit, qty))
 
-            item_id = cur.fetchone()[0]
+            row     = cur.fetchone()
+            item_id = row[0]
 
             cur.execute("""
                 INSERT INTO inventory_movements
                     (item_id, movement_type, quantity, source, source_id, note)
                 VALUES (%s, 'in', %s, 'delivery', %s, %s)
-            """, (item_id, qty, delivery_id, f"Delivery #{delivery_id}"))
+            """, (item_id, qty, delivery_id, f"Delivery #{delivery_id} — {qty} {unit}"))
 
     conn.commit()
 
