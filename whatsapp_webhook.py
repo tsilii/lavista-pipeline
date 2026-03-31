@@ -105,9 +105,10 @@ def init_invoice_tables(conn) -> None:
 # ── Claude Vision extraction ───────────────────────────────────────────────────
 
 EXTRACTION_PROMPT = """
-You are an invoice data extraction assistant for a restaurant.
+You are an invoice data extraction assistant for a restaurant in Cyprus.
+Invoices may come from different suppliers with different layouts, in English or Greek or mixed.
 
-Extract the following from the invoice image and return ONLY valid JSON, no explanation, no markdown, no backticks.
+Extract the following and return ONLY valid JSON. No explanation, no markdown, no backticks.
 
 Required JSON format:
 {
@@ -125,12 +126,37 @@ Required JSON format:
   "total": number or null
 }
 
-Rules:
-- invoice_date must be in YYYY-MM-DD format. If only month/year visible, use the 1st of that month.
-- All prices must be numbers (no currency symbols).
-- If an item has no quantity visible, use 1.
-- If a field is not visible or unclear, use null.
-- The invoice may be in English or Greek — extract correctly from both.
+SUPPLIER NAME rules:
+- The supplier is the company SELLING the goods — their name is usually at the top of the invoice in large text.
+- Ignore the buyer name (e.g. "KSENOS FOOD", "SOVA") — that is the restaurant receiving the goods.
+
+DATE rules:
+- Use the invoice date (Ημερομηνία), not any delivery or due date.
+- Format must be YYYY-MM-DD. If only month/year visible, use the 1st of that month.
+
+INVOICE NUMBER rules:
+- Look for labels like: Invoice #, Αρ. Παραστατικού, Αρ. Τιμολογίου, Invoice No, Ref.
+- Extract the number value only, not the label.
+
+TOTAL rules:
+- Use the FINAL total — the amount actually owed after VAT.
+- Look for labels like: Συνολική Αξία EUR, Total, Grand Total, Σύνολο Πληρωτέο, Amount Due.
+- NEVER use pre-VAT subtotals, net values (Καθαρή Αξία), or goods value (Αξία Εμπορευμάτων).
+- If VAT (Φ.Π.Α.) is shown separately, the total must INCLUDE it.
+
+LINE ITEM rules:
+- Extract every product row from the main table.
+- description: product name as written, in the original language.
+- quantity: the QTY or Ποσότητα column value.
+- unit_price: the Price or Τιμή column value.
+- subtotal: use the Net or Σύνολο or Αξία column — this is the final line value after any discount.
+- SKIP items where subtotal is 0.00 — these are free packaging or empty rows.
+- If no unit price is visible, calculate it as subtotal / quantity.
+- All numbers must be plain numbers — no currency symbols, no commas as thousands separators.
+
+GENERAL rules:
+- If a field is genuinely not visible or unclear, use null.
+- Do not guess or invent values.
 - Return ONLY the JSON object. Nothing else.
 """
 
