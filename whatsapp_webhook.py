@@ -147,7 +147,7 @@ TOTAL rules:
 
 LINE ITEM rules:
 - Extract every product row from the main table.
-- description: product name as written, in the original language.
+- description: product name always in Greek. If the name is in English or Latin characters (e.g. "rigani", "RIGANI", "tomatoes"), translate or transliterate it to the standard Greek name (e.g. "Ριγανη", "Ντοματες"). If you are unsure of the Greek name, keep the original. Always use Title Case (first letter capital, rest lowercase).
 - quantity: the QTY or Ποσότητα column value.
 - unit_price: the Price or Τιμή column value.
 - subtotal: use the Net or Σύνολο or Αξία column — this is the final line value after any discount.
@@ -310,7 +310,8 @@ def update_inventory_for_delivery(conn, delivery_id: int, items: list[dict]) -> 
     """
     with conn.cursor() as cur:
         for item in items:
-            name = (item.get("description") or "").strip()
+            # Normalize to Title Case — "RIGANI", "rigani", "Rigani" all become "Rigani"
+            name = (item.get("description") or "").strip().title()
             qty  = float(item.get("quantity") or 0)
             if not name or qty <= 0:
                 continue
@@ -342,7 +343,7 @@ def save_delivery(conn, data: dict) -> int:
     Insert a confirmed invoice into supplier_deliveries + delivery_items.
     Returns the new delivery id.
     """
-    supplier    = data.get("supplier_name") or "Unknown Supplier"
+    supplier    = (data.get("supplier_name") or "Unknown Supplier").strip().title()
     raw_date    = data.get("invoice_date")
     total       = data.get("total") or 0.0
     inv_number  = data.get("invoice_number")
