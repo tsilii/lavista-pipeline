@@ -185,59 +185,47 @@ def extract_invoice_data(image_bytes: bytes, content_type: str) -> dict | None:
     }
     media_type = media_type_map.get(content_type.lower(), "image/jpeg")
 
-    max_retries = 3
-    backoff     = [5, 15, 30]  # seconds to wait between retries
-
-    for attempt in range(max_retries):
-        try:
-            message = client.messages.create(
-                model="claude-opus-4-6",
-                max_tokens=1024,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type":   "image",
-                                "source": {
-                                    "type":       "base64",
-                                    "media_type": media_type,
-                                    "data":       image_b64,
-                                },
+    try:
+        message = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type":   "image",
+                            "source": {
+                                "type":       "base64",
+                                "media_type": media_type,
+                                "data":       image_b64,
                             },
-                            {
-                                "type": "text",
-                                "text": EXTRACTION_PROMPT,
-                            },
-                        ],
-                    }
-                ],
-            )
+                        },
+                        {
+                            "type": "text",
+                            "text": EXTRACTION_PROMPT,
+                        },
+                    ],
+                }
+            ],
+        )
 
-            raw_text  = message.content[0].text.strip()
-            log.info("Claude raw response: %s", raw_text[:200])
-            extracted = json.loads(raw_text)
-            return extracted
+        raw_text  = message.content[0].text.strip()
+        log.info("Claude raw response: %s", raw_text[:200])
+        extracted = json.loads(raw_text)
+        return extracted
 
-        except json.JSONDecodeError as e:
-            log.error("Claude returned invalid JSON: %s", e)
-            return None  # no point retrying a JSON parse error
+    except json.JSONDecodeError as e:
+        log.error("Claude returned invalid JSON: %s", e)
+        return None
 
-        except Exception as e:
-            error_str = str(e)
-            is_overload = "529" in error_str or "overloaded" in error_str.lower()
-
-            if is_overload and attempt < max_retries - 1:
-                wait = backoff[attempt]
-                log.warning("Anthropic API overloaded (attempt %d/%d) — retrying in %ds",
-                            attempt + 1, max_retries, wait)
-                time.sleep(wait)
-                continue
-
-            log.error("Claude Vision extraction failed: %s", e)
-            return None
-
-    return None
+    except Exception as e:
+        error_str = str(e)
+        if "529" in error_str or "overloaded" in error_str.lower():
+            log.warning("Anthropic API overloaded — returning overload signal")
+            return {"_overloaded": True}  # special signal so we can give a better message
+        log.error("Claude Vision extraction failed: %s", e)
+        return None
 
 
 # ── Image download ─────────────────────────────────────────────────────────────
@@ -490,8 +478,14 @@ async def whatsapp_webhook(
         if not extracted:
             conn.close()
             return twiml_reply(
-                "⏳ The system is busy right now and could not read the invoice.\n\n"
-                "Please send the photo again in a minute."
+                "❌ Could not read the invoice. "
+                "Please make sure the photo is clear and well-lit, then try again."
+            )
+        if extracted.get("_overloaded"):
+            conn.close()
+            return twiml_reply(
+                "⏳ The system is busy right now.\n\n"
+                "Please send the photo again in a moment."
             )
 
         store_pending(conn, from_number, extracted)
