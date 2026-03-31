@@ -138,62 +138,80 @@ Rules:
 def extract_invoice_data(image_bytes: bytes, content_type: str) -> dict | None:
     """
     Send invoice image to Claude Vision and return extracted structured data.
-    Returns None if extraction fails.
+    Retries up to 3 times on overload errors (529) with exponential backoff.
+    Returns None if extraction fails after all retries.
     """
+    import time
+
     if not ANTHROPIC_API_KEY:
         log.error("ANTHROPIC_API_KEY is not set — cannot extract invoice.")
         return None
 
-    try:
-        client    = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    client    = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
 
-        # Map Twilio content types to Anthropic accepted media types
-        media_type_map = {
-            "image/jpeg": "image/jpeg",
-            "image/jpg":  "image/jpeg",
-            "image/png":  "image/png",
-            "image/webp": "image/webp",
-            "image/gif":  "image/gif",
-        }
-        media_type = media_type_map.get(content_type.lower(), "image/jpeg")
+    media_type_map = {
+        "image/jpeg": "image/jpeg",
+        "image/jpg":  "image/jpeg",
+        "image/png":  "image/png",
+        "image/webp": "image/webp",
+        "image/gif":  "image/gif",
+    }
+    media_type = media_type_map.get(content_type.lower(), "image/jpeg")
 
-        message = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type":   "image",
-                            "source": {
-                                "type":       "base64",
-                                "media_type": media_type,
-                                "data":       image_b64,
+    max_retries = 3
+    backoff     = [5, 15, 30]  # seconds to wait between retries
+
+    for attempt in range(max_retries):
+        try:
+            message = client.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type":   "image",
+                                "source": {
+                                    "type":       "base64",
+                                    "media_type": media_type,
+                                    "data":       image_b64,
+                                },
                             },
-                        },
-                        {
-                            "type": "text",
-                            "text": EXTRACTION_PROMPT,
-                        },
-                    ],
-                }
-            ],
-        )
+                            {
+                                "type": "text",
+                                "text": EXTRACTION_PROMPT,
+                            },
+                        ],
+                    }
+                ],
+            )
 
-        raw_text = message.content[0].text.strip()
-        log.info("Claude raw response: %s", raw_text[:200])
+            raw_text  = message.content[0].text.strip()
+            log.info("Claude raw response: %s", raw_text[:200])
+            extracted = json.loads(raw_text)
+            return extracted
 
-        extracted = json.loads(raw_text)
-        return extracted
+        except json.JSONDecodeError as e:
+            log.error("Claude returned invalid JSON: %s", e)
+            return None  # no point retrying a JSON parse error
 
-    except json.JSONDecodeError as e:
-        log.error("Claude returned invalid JSON: %s", e)
-        return None
-    except Exception as e:
-        log.error("Claude Vision extraction failed: %s", e)
-        return None
+        except Exception as e:
+            error_str = str(e)
+            is_overload = "529" in error_str or "overloaded" in error_str.lower()
+
+            if is_overload and attempt < max_retries - 1:
+                wait = backoff[attempt]
+                log.warning("Anthropic API overloaded (attempt %d/%d) — retrying in %ds",
+                            attempt + 1, max_retries, wait)
+                time.sleep(wait)
+                continue
+
+            log.error("Claude Vision extraction failed: %s", e)
+            return None
+
+    return None
 
 
 # ── Image download ─────────────────────────────────────────────────────────────
@@ -446,8 +464,8 @@ async def whatsapp_webhook(
         if not extracted:
             conn.close()
             return twiml_reply(
-                "❌ Could not read the invoice. "
-                "Please make sure the photo is clear and well-lit, then try again."
+                "⏳ The system is busy right now and could not read the invoice.\n\n"
+                "Please send the photo again in a minute."
             )
 
         store_pending(conn, from_number, extracted)
