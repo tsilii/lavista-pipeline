@@ -159,7 +159,18 @@ LINE ITEM rules:
     split them: quantity = the number, unit = the unit suffix (normalized).
     If the description contains a size like "500GR" or "80GR" or "1L",
     this is the pack size — keep the U/M column unit for tracking (e.g. pcs).
-- description: product name always in Greek. If the name is in English or Latin characters (e.g. "rigani", "RIGANI", "tomatoes"), translate or transliterate it to the standard Greek name (e.g. "Ριγανη", "Ντοματες"). If you are unsure of the Greek name, keep the original. Always use Title Case (first letter capital, rest lowercase).
+- description: product name always in proper Greek. Rules:
+    * Use the correct standard Greek word — NOT a phonetic transliteration of the English.
+      Examples: RASBERRIES → Σμέουρα, TOMATOES → Ντομάτες, POTATOES → Πατάτες,
+      MUSHROOMS → Μανιτάρια, ASPARAGUS → Σπαράγγια, DILL → Άνηθος,
+      OREGANO/RIGANI → Ρίγανη, THYME/THYMARI → Θυμάρι, SPRING ONIONS → Κρεμμυδάκια,
+      BANANAS → Μπανάνες, ORANGES → Πορτοκάλια, LEMONS → Λεμόνια,
+      STRAWBERRIES → Φράουλες, BLUEBERRIES → Βατόμουρα, WATERMELON → Καρπούζι,
+      MILK → Γάλα, CHEESE → Τυρί, YOGURT → Γιαούρτι.
+    * If you do not know the Greek word with certainty, keep the original English name.
+    * Do NOT transliterate English sounds into Greek letters.
+    * Keep size suffixes as-is (e.g. "500GR", "125GR", "1L") in the original format.
+    * Always use Title Case (first letter capital, rest lowercase).
 - quantity: the QTY or Ποσότητα column value.
 - unit_price: the Price or Τιμή column value.
 - subtotal: use the Net or Σύνολο or Αξία column — this is the final line value after any discount.
@@ -361,19 +372,32 @@ def update_inventory_for_delivery(conn, delivery_id: int, items: list[dict]) -> 
             if not name or qty <= 0:
                 continue
 
-            # Upsert — on conflict update quantity but preserve the existing unit
-            # so the first delivery sets the unit and subsequent ones respect it
+            # Case-insensitive lookup first — prevents duplicates from spelling variations
             cur.execute("""
-                INSERT INTO inventory_items (name, unit, quantity, updated_at)
-                VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (name) DO UPDATE SET
-                    quantity   = inventory_items.quantity + EXCLUDED.quantity,
-                    updated_at = NOW()
-                RETURNING id, unit
-            """, (name, unit, qty))
+                SELECT id, name FROM inventory_items
+                WHERE LOWER(name) = LOWER(%s)
+                LIMIT 1
+            """, (name,))
+            existing = cur.fetchone()
 
-            row     = cur.fetchone()
-            item_id = row[0]
+            if existing:
+                # Use the existing item's canonical name — don't create a new row
+                item_id       = existing[0]
+                canonical_name = existing[1]
+                cur.execute("""
+                    UPDATE inventory_items
+                    SET quantity   = quantity + %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                """, (qty, item_id))
+            else:
+                # New item — insert it
+                cur.execute("""
+                    INSERT INTO inventory_items (name, unit, quantity, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    RETURNING id
+                """, (name, unit, qty))
+                item_id = cur.fetchone()[0]
 
             cur.execute("""
                 INSERT INTO inventory_movements
