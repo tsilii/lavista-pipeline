@@ -111,7 +111,10 @@ Invoices may come from different suppliers with different layouts, in English or
 
 First check: is this document a supplier invoice or delivery note with products and a total amount?
 - YES → extract the data as instructed below
-- NO (it is a statement of account, bank statement, credit note, aged balance, or any other document) →
+- A document IS an invoice if it contains: a list of products/items, quantities, prices, and a total amount.
+- "Credit Invoice", "AR Invoice", "Sales Invoice", "Tax Invoice", "Delivery Note" are ALL valid invoices — extract them.
+- A "Credit Note" or "Credit Memo" that CANCELS a previous invoice and shows NEGATIVE amounts or items returned is NOT an invoice.
+- NO (it is a statement of account, bank statement, aged balance, or credit note cancelling a previous invoice) →
   return exactly this JSON: {"_not_invoice": true, "document_type": "describe what it is in one sentence"}
 
 If it IS an invoice, extract the following and return ONLY valid JSON. No explanation, no markdown, no backticks.
