@@ -109,7 +109,12 @@ EXTRACTION_PROMPT = """
 You are an invoice data extraction assistant for a restaurant in Cyprus.
 Invoices may come from different suppliers with different layouts, in English or Greek or mixed.
 
-Extract the following and return ONLY valid JSON. No explanation, no markdown, no backticks.
+First check: is this document a supplier invoice or delivery note with products and a total amount?
+- YES → extract the data as instructed below
+- NO (it is a statement of account, bank statement, credit note, aged balance, or any other document) →
+  return exactly this JSON: {"_not_invoice": true, "document_type": "describe what it is in one sentence"}
+
+If it IS an invoice, extract the following and return ONLY valid JSON. No explanation, no markdown, no backticks.
 
 Required JSON format:
 {
@@ -586,6 +591,14 @@ def process_invoice_background(from_number: str, media_url: str, content_type: s
     if extracted.get("_overloaded"):
         send_whatsapp_message(from_number,
             "⏳ The system is busy right now. Please send the photo again in a moment.")
+        return
+
+    if extracted.get("_not_invoice"):
+        doc_type = extracted.get("document_type", "unknown document")
+        send_whatsapp_message(from_number,
+            f"❌ This doesn't look like an invoice.\n\n"
+            f"Detected: {doc_type}\n\n"
+            f"Please send a supplier invoice or delivery note with products and a total amount.")
         return
 
     try:
