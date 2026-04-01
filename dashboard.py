@@ -265,39 +265,44 @@ def delete_delivery_with_reversal(delivery_id):
     """
     Delete a delivery AND reverse its inventory movements.
     Used only from the Audit Log — for correcting mistakes.
-    The regular delete_delivery() is used from the Delivery Log (paid/remove from view).
     """
     conn = get_conn()
     if not conn:
         return False, "Could not connect to database."
     try:
         with conn.cursor() as cur:
-            # Find inventory movements from this delivery and reverse them
             cur.execute("""
                 SELECT item_id, quantity FROM inventory_movements
                 WHERE source = 'delivery' AND source_id = %s AND movement_type = 'in'
             """, (delivery_id,))
             movements = cur.fetchall()
- 
+
             for item_id, qty in movements:
-                cur.execute("""
-                    UPDATE inventory_items
-                    SET quantity   = GREATEST(0, quantity - %s),
-                        updated_at = NOW()
-                    WHERE id = %s
-                """, (qty, item_id))
-                cur.execute("""
-                    INSERT INTO inventory_movements
-                        (item_id, movement_type, quantity, source, source_id, note)
-                    VALUES (%s, 'out', %s, 'manual', %s, %s)
-                """, (item_id, qty, delivery_id,
-                      f"Reversal: delivery #{delivery_id} deleted from audit log"))
- 
-            # Delete delivery (cascades to delivery_items via FK)
-            cur.execute(
-                "DELETE FROM supplier_deliveries WHERE id = %s", (delivery_id,)
-            )
- 
+                cur.execute("SELECT quantity FROM inventory_items WHERE id = %s", (item_id,))
+                row = cur.fetchone()
+                if not row:
+                    continue
+                new_qty = float(row[0]) - float(qty)
+
+                if new_qty <= 0:
+                    cur.execute("DELETE FROM inventory_movements WHERE item_id = %s", (item_id,))
+                    cur.execute("DELETE FROM inventory_items WHERE id = %s", (item_id,))
+                else:
+                    cur.execute("""
+                        UPDATE inventory_items
+                        SET quantity   = %s,
+                            updated_at = NOW()
+                        WHERE id = %s
+                    """, (new_qty, item_id))
+                    cur.execute("""
+                        INSERT INTO inventory_movements
+                            (item_id, movement_type, quantity, source, source_id, note)
+                        VALUES (%s, 'out', %s, 'manual', %s, %s)
+                    """, (item_id, qty, delivery_id,
+                          f"Reversal: delivery #{delivery_id} deleted from audit log"))
+
+            cur.execute("DELETE FROM supplier_deliveries WHERE id = %s", (delivery_id,))
+
         conn.commit()
         return True, f"Delivery #{delivery_id} deleted and inventory reversed."
     except Exception as e:
