@@ -465,13 +465,34 @@ def send_whatsapp_message(to: str, message: str) -> None:
 
 def format_summary(data: dict) -> str:
     """Format extracted invoice data into a readable WhatsApp message."""
+    from datetime import date as date_type, timedelta
+
     supplier = data.get("supplier_name") or "Unknown supplier"
     date_str = data.get("invoice_date")   or "Date not found"
     inv_num  = data.get("invoice_number")
     total    = data.get("total")
     items    = data.get("items") or []
 
+    # Date validation — warn if date looks wrong
+    date_warning = None
+    if date_str and date_str != "Date not found":
+        try:
+            parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            today       = date_type.today()
+            delta       = (today - parsed_date).days
+            if delta > 60:
+                date_warning = f"⚠️ WARNING: Date is {delta} days in the past ({date_str}). Please check this is correct before confirming."
+            elif delta < -7:
+                date_warning = f"⚠️ WARNING: Date is in the future ({date_str}). Please check this is correct before confirming."
+        except ValueError:
+            date_warning = f"⚠️ WARNING: Could not parse date '{date_str}'. Please verify."
+
     lines = ["📦 *Invoice detected:*", ""]
+
+    if date_warning:
+        lines.append(date_warning)
+        lines.append("")
+
     lines.append(f"*Supplier:* {supplier}")
     lines.append(f"*Date:* {date_str}")
     if inv_num:

@@ -261,6 +261,50 @@ def delete_delivery(delivery_id):
     finally:
         conn.close()
 
+def delete_delivery_with_reversal(delivery_id):
+    """
+    Delete a delivery AND reverse its inventory movements.
+    Used only from the Audit Log — for correcting mistakes.
+    The regular delete_delivery() is used from the Delivery Log (paid/remove from view).
+    """
+    conn = get_conn()
+    if not conn:
+        return False, "Could not connect to database."
+    try:
+        with conn.cursor() as cur:
+            # Find inventory movements from this delivery and reverse them
+            cur.execute("""
+                SELECT item_id, quantity FROM inventory_movements
+                WHERE source = 'delivery' AND source_id = %s AND movement_type = 'in'
+            """, (delivery_id,))
+            movements = cur.fetchall()
+ 
+            for item_id, qty in movements:
+                cur.execute("""
+                    UPDATE inventory_items
+                    SET quantity   = GREATEST(0, quantity - %s),
+                        updated_at = NOW()
+                    WHERE id = %s
+                """, (qty, item_id))
+                cur.execute("""
+                    INSERT INTO inventory_movements
+                        (item_id, movement_type, quantity, source, source_id, note)
+                    VALUES (%s, 'out', %s, 'manual', %s, %s)
+                """, (item_id, qty, delivery_id,
+                      f"Reversal: delivery #{delivery_id} deleted from audit log"))
+ 
+            # Delete delivery (cascades to delivery_items via FK)
+            cur.execute(
+                "DELETE FROM supplier_deliveries WHERE id = %s", (delivery_id,)
+            )
+ 
+        conn.commit()
+        return True, f"Delivery #{delivery_id} deleted and inventory reversed."
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
 
 # ── Navigation ─────────────────────────────────────────────────────────────────
 
@@ -979,6 +1023,68 @@ elif page == "Suppliers":
 
     else:
         st.info("No deliveries recorded yet. Add your first delivery below.")
+
+
+    
+    st.divider()
+    st.subheader("📋 Ingestion Audit Log")
+    st.caption("All deliveries saved via WhatsApp. Delete here to correct mistakes — inventory will be reversed automatically.")
+
+    @st.cache_data(ttl=10)
+    def load_audit_log():
+        conn = get_conn()
+        if not conn:
+            return None
+        try:
+            return pd.read_sql("""
+                SELECT
+                    sd.id,
+                    sd.supplier_name,
+                    sd.delivery_date,
+                    sd.amount,
+                    sd.description,
+                    sd.paid,
+                    sd.created_at,
+                    COUNT(di.id) as item_count
+                FROM supplier_deliveries sd
+                LEFT JOIN delivery_items di ON di.delivery_id = sd.id
+                GROUP BY sd.id
+                ORDER BY sd.created_at DESC
+                LIMIT 50
+            """, conn)
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
+    audit = load_audit_log()
+
+    if audit is None or audit.empty:
+        st.info("No deliveries recorded yet.")
+    else:
+        for _, row in audit.iterrows():
+            col_info, col_date, col_amt, col_items, col_del = st.columns([3, 2, 1.5, 1, 0.5])
+
+            col_info.markdown(f"**{row['supplier_name']}**")
+            col_info.caption(f"#{row['id']} — {row['description'] or '—'}")
+
+            col_date.write(str(row['delivery_date']))
+            col_date.caption(f"Saved: {pd.to_datetime(row['created_at']).strftime('%Y-%m-%d %H:%M')}")
+
+            col_amt.write(f"€{float(row['amount']):,.2f}")
+            col_amt.caption("✅ Paid" if row['paid'] else "⏳ Unpaid")
+
+            col_items.write(f"{int(row['item_count'])} items")
+
+            if col_del.button("🗑", key=f"audit_del_{row['id']}",
+                              help="Delete this mistake and reverse inventory"):
+                success, message = delete_delivery_with_reversal(row['id'])
+                if success:
+                    st.success(message)
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error(f"Error: {message}")
 
     st.divider()
     st.subheader("Add Delivery")
