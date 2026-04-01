@@ -1024,11 +1024,9 @@ elif page == "Suppliers":
     else:
         st.info("No deliveries recorded yet. Add your first delivery below.")
 
-
-    
     st.divider()
     st.subheader("📋 Ingestion Audit Log")
-    st.caption("All deliveries saved via WhatsApp. Delete here to correct mistakes — inventory will be reversed automatically.")
+    st.caption("All deliveries saved via WhatsApp, grouped by supplier. Delete here to correct mistakes — inventory will be reversed automatically.")
 
     @st.cache_data(ttl=10)
     def load_audit_log():
@@ -1062,29 +1060,40 @@ elif page == "Suppliers":
     if audit is None or audit.empty:
         st.info("No deliveries recorded yet.")
     else:
-        for _, row in audit.iterrows():
-            col_info, col_date, col_amt, col_items, col_del = st.columns([3, 2, 1.5, 1, 0.5])
+        for supplier in sorted(audit["supplier_name"].unique()):
+            sup_audit = audit[audit["supplier_name"] == supplier].sort_values("delivery_date", ascending=False)
+            sup_total = float(sup_audit["amount"].sum())
+            sup_count = len(sup_audit)
 
-            col_info.markdown(f"**{row['supplier_name']}**")
-            col_info.caption(f"#{row['id']} — {row['description'] or '—'}")
+            with st.expander(
+                f"**{supplier}** — {sup_count} deliveries — Total: €{sup_total:,.2f}",
+                expanded=False
+            ):
+                h1, h2, h3, h4, h5 = st.columns([2, 2, 1.5, 1, 0.5])
+                h1.markdown("**Date**")
+                h2.markdown("**Description**")
+                h3.markdown("**Amount**")
+                h4.markdown("**Items**")
+                h5.markdown("**Del**")
 
-            col_date.write(str(row['delivery_date']))
-            col_date.caption(f"Saved: {pd.to_datetime(row['created_at']).strftime('%Y-%m-%d %H:%M')}")
+                for _, row in sup_audit.iterrows():
+                    c1, c2, c3, c4, c5 = st.columns([2, 2, 1.5, 1, 0.5])
+                    c1.write(str(row["delivery_date"]))
+                    c1.caption(f"Saved: {pd.to_datetime(row['created_at']).strftime('%Y-%m-%d %H:%M')}")
+                    c2.write(row["description"] or "—")
+                    c3.write(f"€{float(row['amount']):,.2f}")
+                    c3.caption("✅ Paid" if row["paid"] else "⏳ Unpaid")
+                    c4.write(f"{int(row['item_count'])} items")
 
-            col_amt.write(f"€{float(row['amount']):,.2f}")
-            col_amt.caption("✅ Paid" if row['paid'] else "⏳ Unpaid")
-
-            col_items.write(f"{int(row['item_count'])} items")
-
-            if col_del.button("🗑", key=f"audit_del_{row['id']}",
-                              help="Delete this mistake and reverse inventory"):
-                success, message = delete_delivery_with_reversal(row['id'])
-                if success:
-                    st.success(message)
-                    st.cache_data.clear()
-                    st.rerun()
-                else:
-                    st.error(f"Error: {message}")
+                    if c5.button("🗑", key=f"audit_del_{row['id']}",
+                                  help="Delete this mistake and reverse inventory"):
+                        success, message = delete_delivery_with_reversal(row["id"])
+                        if success:
+                            st.success(message)
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Error: {message}")
 
     st.divider()
     st.subheader("Add Delivery")
@@ -1110,7 +1119,6 @@ elif page == "Suppliers":
                 st.rerun()
             else:
                 st.error(f"Error: {message}")
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: INVENTORY
