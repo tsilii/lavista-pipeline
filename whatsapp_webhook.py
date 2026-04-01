@@ -138,10 +138,11 @@ SUPPLIER NAME rules:
 - Ignore the buyer name (e.g. "KSENOS FOOD", "SOVA") — that is the restaurant receiving the goods.
 
 DATE rules:
-- Use the invoice date (Ημερομηνία), not any delivery or due date.
+- Use the invoice date (Ημερομηνία / Date), not any delivery or due date.
 - Format must be YYYY-MM-DD. If only month/year visible, use the 1st of that month.
-- The current year is 2026. If the year on the invoice looks like 2025 but the rest
-  of the date (day/month) matches a recent date, it is almost certainly 2026 — use 2026.
+- The current year is 2026. Always expand 2-digit years: "26" → 2026, "25" → 2025.
+- Date formats you may encounter: DD/MM/YYYY, DD.MM.YYYY, DD/MM/YY, DD.MM.YY, YYYY-MM-DD.
+- If the year on the invoice looks like 2025 but the date is recent, it is almost certainly 2026.
 - Only use a past year if the invoice is clearly and unambiguously dated in the past.
 
 INVOICE NUMBER rules:
@@ -184,7 +185,16 @@ LINE ITEM rules:
 - subtotal: use the Net or Σύνολο or Αξία column — this is the final line value after any discount.
 - SKIP items where subtotal is 0.00 — these are free packaging or empty rows.
 - If no unit price is visible, calculate it as subtotal / quantity.
-- All numbers must be plain numbers — no currency symbols, no commas as thousands separators.
+- All numbers must be plain numbers — no currency symbols, no currency codes (EUR, USD etc.), no commas as thousands separators.
+  Examples: "EUR 11.00" → 11.00, "€44.00" → 44.00, "1,250.00" → 1250.00
+
+READABILITY rules:
+- The image may be a photo taken at an angle, with shadows, or partially blurred.
+  Do your best to read all visible text — do not give up on a document just because
+  some parts are hard to read.
+- If a number is partially obscured, make your best reasonable estimate based on context
+  and mark it with a note in the description if needed.
+- Read the entire document carefully before extracting — don't stop at the first section.
 
 GENERAL rules:
 - If a field is genuinely not visible or unclear, use null.
@@ -220,7 +230,7 @@ def extract_invoice_data(image_bytes: bytes, content_type: str) -> dict | None:
     try:
         message = client.messages.create(
             model="claude-opus-4-6",
-            max_tokens=1024,
+            max_tokens=2048,
             messages=[
                 {
                     "role": "user",
@@ -242,14 +252,26 @@ def extract_invoice_data(image_bytes: bytes, content_type: str) -> dict | None:
             ],
         )
 
-        raw_text  = message.content[0].text.strip()
+        raw_text = message.content[0].text.strip()
         log.info("Claude raw response: %s", raw_text[:200])
+
+        if not raw_text:
+            log.warning("Claude returned empty response — document may be unreadable or unsupported")
+            return {"_not_invoice": True, "document_type": "unreadable or unsupported document"}
+
+        # Strip markdown code fences if Claude added them despite instructions
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```")[1]
+            if raw_text.startswith("json"):
+                raw_text = raw_text[4:]
+            raw_text = raw_text.strip()
+
         extracted = json.loads(raw_text)
         return extracted
 
     except json.JSONDecodeError as e:
         log.error("Claude returned invalid JSON: %s", e)
-        return None
+        return {"_not_invoice": True, "document_type": "could not parse the document"}
 
     except Exception as e:
         error_str = str(e)
