@@ -135,6 +135,9 @@ SUPPLIER NAME rules:
 DATE rules:
 - Use the invoice date (Ημερομηνία), not any delivery or due date.
 - Format must be YYYY-MM-DD. If only month/year visible, use the 1st of that month.
+- The current year is 2026. If the year on the invoice looks like 2025 but the rest
+  of the date (day/month) matches a recent date, it is almost certainly 2026 — use 2026.
+- Only use a past year if the invoice is clearly and unambiguously dated in the past.
 
 INVOICE NUMBER rules:
 - Look for labels like: Invoice #, Αρ. Παραστατικού, Αρ. Τιμολογίου, Invoice No, Ref.
@@ -424,6 +427,14 @@ def save_delivery(conn, data: dict) -> int:
     # Parse date — fall back to today if missing or invalid
     try:
         delivery_date = datetime.strptime(raw_date, "%Y-%m-%d").date() if raw_date else datetime.today().date()
+        # Auto-correct year if date is suspiciously far in the past (likely a misread year)
+        today = datetime.today().date()
+        if (today - delivery_date).days > 60:
+            corrected = delivery_date.replace(year=today.year)
+            # Only apply correction if it makes the date reasonable
+            if abs((today - corrected).days) <= 60:
+                log.warning("Auto-corrected year from %s to %s", delivery_date, corrected)
+                delivery_date = corrected
     except ValueError:
         delivery_date = datetime.today().date()
 
