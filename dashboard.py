@@ -925,7 +925,7 @@ elif page == "Suppliers":
         k4.metric("Carried Over",        f"€{total_carried_over:,.2f}", help="Unpaid from previous months")
         k5.metric("Total Outstanding",   f"€{total_outstanding:,.2f}", help="This month + carried over")
 
-        # ── Recent Ingestions ─────────────────────────────────────────────────
+        # Recent Ingestions
         st.divider()
         st.subheader("🕐 Recent Ingestions")
         st.caption("Last 20 deliveries added to the system, most recent first.")
@@ -938,7 +938,7 @@ elif page == "Suppliers":
             try:
                 return pd.read_sql("""
                     SELECT
-                        created_at,
+                        created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Copenhagen' AS ingested_at,
                         supplier_name,
                         delivery_date,
                         amount,
@@ -956,16 +956,16 @@ elif page == "Suppliers":
         recent = load_recent_ingestions()
 
         if recent is not None and not recent.empty:
-            recent["created_at"]    = pd.to_datetime(recent["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
-            recent["amount"]        = recent["amount"].apply(lambda x: f"€{x:,.2f}")
-            recent["paid"]          = recent["paid"].apply(lambda x: "✅" if x else "—")
-            recent["description"]   = recent["description"].fillna("—")
-            recent.columns          = ["Saved At", "Supplier", "Invoice Date", "Amount", "Description", "Paid"]
+            recent["ingested_at"]  = pd.to_datetime(recent["ingested_at"]).dt.strftime("%Y-%m-%d %H:%M")
+            recent["amount"]       = recent["amount"].apply(lambda x: f"€{x:,.2f}")
+            recent["paid"]         = recent["paid"].apply(lambda x: "✅" if x else "—")
+            recent["description"]  = recent["description"].fillna("—")
+            recent.columns         = ["Saved At", "Supplier", "Invoice Date", "Amount", "Description", "Paid"]
             st.dataframe(recent, use_container_width=True, hide_index=True)
         else:
             st.info("No deliveries recorded yet.")
 
-        # ── Supplier Balance ──────────────────────────────────────────────────
+        # Supplier Balance
         st.divider()
         st.subheader(f"Supplier Balance — {selected_month.strftime('%B %Y')}")
         st.caption("Carried Over = unpaid deliveries from all previous months per supplier")
@@ -997,7 +997,7 @@ elif page == "Suppliers":
         if summary_rows:
             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
-        # ── Delivery Log ──────────────────────────────────────────────────────
+        # Delivery Log
         st.divider()
         st.subheader(f"Delivery Log — {selected_month.strftime('%B %Y')}")
 
@@ -1049,30 +1049,30 @@ elif page == "Suppliers":
                     f2.markdown(f"**€{sup_total:,.2f}**")
                     f3.markdown(f"**Owed: €{sup_owed:,.2f}**")
 
-        # ── Historical Pivot ──────────────────────────────────────────────────
+        # Historical Pivot
         st.divider()
         st.subheader("Supplier Expenses — All Months")
         st.caption("Total deliveries per supplier per month (€)")
 
-        pivot            = deliveries.copy()
+        pivot                = deliveries.copy()
         pivot["month_label"] = pivot["month"].apply(lambda m: m.strftime("%b %Y"))
-        pivot_table      = pivot.pivot_table(index="supplier_name", columns="month_label",
-                                             values="amount", aggfunc="sum", fill_value=0)
-        month_order      = sorted(pivot["month"].unique())
-        col_order        = [m.strftime("%b %Y") for m in month_order]
-        pivot_table      = pivot_table.reindex(columns=col_order, fill_value=0)
+        pivot_table          = pivot.pivot_table(index="supplier_name", columns="month_label",
+                                                 values="amount", aggfunc="sum", fill_value=0)
+        month_order          = sorted(pivot["month"].unique())
+        col_order            = [m.strftime("%b %Y") for m in month_order]
+        pivot_table          = pivot_table.reindex(columns=col_order, fill_value=0)
         pivot_table["Total"] = pivot_table.sum(axis=1)
-        total_row        = pivot_table.sum(axis=0)
-        total_row.name   = "TOTAL"
-        pivot_table      = pd.concat([pivot_table, total_row.to_frame().T])
-        formatted        = pivot_table.map(lambda x: f"€{x:,.2f}" if x > 0 else "—")
+        total_row            = pivot_table.sum(axis=0)
+        total_row.name       = "TOTAL"
+        pivot_table          = pd.concat([pivot_table, total_row.to_frame().T])
+        formatted            = pivot_table.map(lambda x: f"€{x:,.2f}" if x > 0 else "—")
         formatted.index.name = "Supplier"
         st.dataframe(formatted, use_container_width=True)
 
     else:
         st.info("No deliveries recorded yet. Add your first delivery below.")
 
-    # ── Ingestion Audit Log ───────────────────────────────────────────────────
+    # Ingestion Audit Log
     st.divider()
     st.subheader("📋 Ingestion Audit Log")
     st.caption("All deliveries saved via WhatsApp, grouped by supplier. Delete here to correct mistakes — inventory will be reversed automatically.")
@@ -1091,11 +1091,12 @@ elif page == "Suppliers":
                     sd.amount,
                     sd.description,
                     sd.paid,
-                    sd.created_at,
+                    sd.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Copenhagen' AS created_at,
                     COUNT(di.id) as item_count
                 FROM supplier_deliveries sd
                 LEFT JOIN delivery_items di ON di.delivery_id = sd.id
-                GROUP BY sd.id
+                GROUP BY sd.id, sd.supplier_name, sd.delivery_date,
+                         sd.amount, sd.description, sd.paid, sd.created_at
                 ORDER BY sd.created_at DESC
                 LIMIT 50
             """, conn)
@@ -1144,7 +1145,7 @@ elif page == "Suppliers":
                         else:
                             st.error(f"Error: {message}")
 
-    # ── Add Delivery ──────────────────────────────────────────────────────────
+    # Add Delivery
     st.divider()
     st.subheader("Add Delivery")
 
