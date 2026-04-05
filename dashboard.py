@@ -925,6 +925,47 @@ elif page == "Suppliers":
         k4.metric("Carried Over",        f"€{total_carried_over:,.2f}", help="Unpaid from previous months")
         k5.metric("Total Outstanding",   f"€{total_outstanding:,.2f}", help="This month + carried over")
 
+        # ── Recent Ingestions ─────────────────────────────────────────────────
+        st.divider()
+        st.subheader("🕐 Recent Ingestions")
+        st.caption("Last 20 deliveries added to the system, most recent first.")
+
+        @st.cache_data(ttl=10)
+        def load_recent_ingestions():
+            conn = get_conn()
+            if not conn:
+                return None
+            try:
+                return pd.read_sql("""
+                    SELECT
+                        created_at,
+                        supplier_name,
+                        delivery_date,
+                        amount,
+                        description,
+                        paid
+                    FROM supplier_deliveries
+                    ORDER BY created_at DESC
+                    LIMIT 20
+                """, conn)
+            except Exception:
+                return None
+            finally:
+                conn.close()
+
+        recent = load_recent_ingestions()
+
+        if recent is not None and not recent.empty:
+            recent["created_at"]    = pd.to_datetime(recent["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
+            recent["amount"]        = recent["amount"].apply(lambda x: f"€{x:,.2f}")
+            recent["paid"]          = recent["paid"].apply(lambda x: "✅" if x else "—")
+            recent["description"]   = recent["description"].fillna("—")
+            recent.columns          = ["Saved At", "Supplier", "Invoice Date", "Amount", "Description", "Paid"]
+            st.dataframe(recent, use_container_width=True, hide_index=True)
+        else:
+            st.info("No deliveries recorded yet.")
+
+        # ── Supplier Balance ──────────────────────────────────────────────────
         st.divider()
         st.subheader(f"Supplier Balance — {selected_month.strftime('%B %Y')}")
         st.caption("Carried Over = unpaid deliveries from all previous months per supplier")
@@ -956,6 +997,7 @@ elif page == "Suppliers":
         if summary_rows:
             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
+        # ── Delivery Log ──────────────────────────────────────────────────────
         st.divider()
         st.subheader(f"Delivery Log — {selected_month.strftime('%B %Y')}")
 
@@ -1007,6 +1049,7 @@ elif page == "Suppliers":
                     f2.markdown(f"**€{sup_total:,.2f}**")
                     f3.markdown(f"**Owed: €{sup_owed:,.2f}**")
 
+        # ── Historical Pivot ──────────────────────────────────────────────────
         st.divider()
         st.subheader("Supplier Expenses — All Months")
         st.caption("Total deliveries per supplier per month (€)")
@@ -1029,6 +1072,7 @@ elif page == "Suppliers":
     else:
         st.info("No deliveries recorded yet. Add your first delivery below.")
 
+    # ── Ingestion Audit Log ───────────────────────────────────────────────────
     st.divider()
     st.subheader("📋 Ingestion Audit Log")
     st.caption("All deliveries saved via WhatsApp, grouped by supplier. Delete here to correct mistakes — inventory will be reversed automatically.")
@@ -1100,6 +1144,7 @@ elif page == "Suppliers":
                         else:
                             st.error(f"Error: {message}")
 
+    # ── Add Delivery ──────────────────────────────────────────────────────────
     st.divider()
     st.subheader("Add Delivery")
 
