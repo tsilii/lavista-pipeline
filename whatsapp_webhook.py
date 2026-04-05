@@ -4,8 +4,11 @@ extracts structured data using Claude Vision, stores a pending confirmation
 in the DB, and replies to the owner with a summary for approval.
 
 Flow:
-  Owner sends photo  →  extract via Claude  →  store as pending  →  reply with summary
-  Owner replies ✅   →  save to supplier_deliveries + delivery_items  →  confirm
+  Owner sends 1–10 photos  →  extract all via Claude  →  store batch as pending
+                           →  reply with consolidated summary
+  Owner replies ✅          →  save each to supplier_deliveries + delivery_items
+                           →  update inventory
+  Duplicate check           →  same supplier + date + total already in DB → skip
 
 Included as a router in pos_api.py.
 Run the full API with: uvicorn pos_api:app --port 8000
@@ -21,7 +24,7 @@ from typing import Optional
 import anthropic
 import psycopg2
 import requests
-from fastapi import APIRouter, BackgroundTasks, Form
+from fastapi import APIRouter, BackgroundTasks, Form, Request
 from fastapi.responses import PlainTextResponse
 from twilio.rest import Client as TwilioClient
 
@@ -209,11 +212,10 @@ GENERAL rules:
 def extract_invoice_data(image_bytes: bytes, content_type: str) -> dict | None:
     """
     Send invoice image to Claude Vision and return extracted structured data.
-    Retries up to 3 times on overload errors (529) with exponential backoff.
-    Returns None if extraction fails after all retries.
+    Returns None if extraction fails.
+    Returns {"_overloaded": True} if API is overloaded.
+    Returns {"_not_invoice": True, ...} if the document is not an invoice.
     """
-    import time
-
     if not ANTHROPIC_API_KEY:
         log.error("ANTHROPIC_API_KEY is not set — cannot extract invoice.")
         return None
@@ -280,7 +282,7 @@ def extract_invoice_data(image_bytes: bytes, content_type: str) -> dict | None:
         error_str = str(e)
         if "529" in error_str or "overloaded" in error_str.lower():
             log.warning("Anthropic API overloaded — returning overload signal")
-            return {"_overloaded": True}  # special signal so we can give a better message
+            return {"_overloaded": True}
         log.error("Claude Vision extraction failed: %s", e)
         return None
 
@@ -309,8 +311,13 @@ def download_twilio_image(url: str) -> tuple[bytes, str] | None:
 
 # ── Pending invoice helpers ────────────────────────────────────────────────────
 
-def store_pending(conn, from_number: str, data: dict) -> int:
-    """Store extracted invoice data as pending confirmation. Returns the new row id."""
+def store_pending(conn, from_number: str, data: dict | list) -> int:
+    """
+    Store extracted invoice data as pending confirmation.
+    Accepts a single invoice dict or a list of invoice dicts (multi-image batch).
+    Cancels any previous pending from the same number before inserting.
+    Returns the new row id.
+    """
     with conn.cursor() as cur:
         # Cancel any previous pending invoices from this number
         cur.execute("""
@@ -355,6 +362,34 @@ def confirm_pending(conn, pending_id: int) -> None:
         )
     conn.commit()
 
+
+# ── Duplicate detection ────────────────────────────────────────────────────────
+
+def is_duplicate(conn, supplier_name: str, delivery_date, total: float) -> bool:
+    """
+    Return True if a delivery with the same supplier, date, and total already
+    exists in supplier_deliveries.
+
+    Matching rules:
+      - supplier_name: case-insensitive, stripped
+      - delivery_date: exact date match
+      - total: within €0.01 (float rounding tolerance)
+    """
+    if not supplier_name or delivery_date is None or total is None:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id FROM supplier_deliveries
+                WHERE LOWER(TRIM(supplier_name)) = LOWER(TRIM(%s))
+                  AND delivery_date = %s
+                  AND ABS(amount - %s) < 0.01
+                LIMIT 1
+            """, (supplier_name, delivery_date, total))
+            return cur.fetchone() is not None
+    except Exception as e:
+        log.error("Duplicate check failed: %s", e)
+        return False
 
 
 # ── Inventory: add stock on delivery ──────────────────────────────────────────
@@ -414,9 +449,7 @@ def update_inventory_for_delivery(conn, delivery_id: int, items: list[dict]) -> 
             existing = cur.fetchone()
 
             if existing:
-                # Use the existing item's canonical name — don't create a new row
-                item_id       = existing[0]
-                canonical_name = existing[1]
+                item_id = existing[0]
                 cur.execute("""
                     UPDATE inventory_items
                     SET quantity   = quantity + %s,
@@ -424,7 +457,6 @@ def update_inventory_for_delivery(conn, delivery_id: int, items: list[dict]) -> 
                     WHERE id = %s
                 """, (qty, item_id))
             else:
-                # New item — insert it
                 cur.execute("""
                     INSERT INTO inventory_items (name, unit, quantity, updated_at)
                     VALUES (%s, %s, %s, NOW())
@@ -443,10 +475,10 @@ def update_inventory_for_delivery(conn, delivery_id: int, items: list[dict]) -> 
 
 # ── Save confirmed delivery ────────────────────────────────────────────────────
 
-def save_delivery(conn, data: dict) -> int:
+def save_delivery(conn, data: dict) -> int | None:
     """
     Insert a confirmed invoice into supplier_deliveries + delivery_items.
-    Returns the new delivery id.
+    Returns the new delivery id, or None if skipped as a duplicate.
     """
     supplier    = (data.get("supplier_name") or "Unknown Supplier").strip().title()
     raw_date    = data.get("invoice_date")
@@ -467,6 +499,11 @@ def save_delivery(conn, data: dict) -> int:
                 delivery_date = corrected
     except ValueError:
         delivery_date = datetime.today().date()
+
+    # Duplicate check — same supplier, date, total already in DB
+    if is_duplicate(conn, supplier, delivery_date, float(total)):
+        log.info("Duplicate skipped — %s on %s €%.2f", supplier, delivery_date, total)
+        return None
 
     description = f"Invoice {inv_number}" if inv_number else "Invoice via WhatsApp"
 
@@ -529,8 +566,8 @@ def send_whatsapp_message(to: str, message: str) -> None:
 # ── Format summary for WhatsApp ────────────────────────────────────────────────
 
 def format_summary(data: dict) -> str:
-    """Format extracted invoice data into a readable WhatsApp message."""
-    from datetime import date as date_type, timedelta
+    """Format a single extracted invoice into a readable WhatsApp message."""
+    from datetime import date as date_type
 
     supplier = data.get("supplier_name") or "Unknown supplier"
     date_str = data.get("invoice_date")   or "Date not found"
@@ -567,10 +604,9 @@ def format_summary(data: dict) -> str:
         lines.append("")
         lines.append("*Items:*")
         for item in items:
-            desc  = item.get("description", "—")
-            qty   = item.get("quantity",    "?")
-            price = item.get("unit_price",  0)
-            sub   = item.get("subtotal",    0)
+            desc = item.get("description", "—")
+            qty  = item.get("quantity",    "?")
+            sub  = item.get("subtotal",    0)
             lines.append(f"  • {desc} x{qty} — €{sub:.2f}")
 
     lines.append("")
@@ -584,96 +620,204 @@ def format_summary(data: dict) -> str:
     return "\n".join(lines)
 
 
+def format_multi_summary(invoices: list[dict], failed: int = 0) -> str:
+    """Format multiple extracted invoices into one consolidated WhatsApp message."""
+    from datetime import date as date_type
+
+    count = len(invoices)
+    lines = [f"📦 *Found {count} invoice{'s' if count > 1 else ''}:*", ""]
+
+    grand_total  = 0.0
+    date_warning = None
+
+    for i, data in enumerate(invoices, 1):
+        supplier = (data.get("supplier_name") or "Unknown supplier").strip()
+        date_str = data.get("invoice_date") or "Date unknown"
+        total    = float(data.get("total") or 0.0)
+        items    = data.get("items") or []
+
+        grand_total += total
+
+        # Flag suspicious dates — report the first one found
+        if date_str and date_str != "Date unknown" and not date_warning:
+            try:
+                parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                delta       = (date_type.today() - parsed_date).days
+                if delta > 60:
+                    date_warning = f"⚠️ WARNING: Invoice {i} date is {delta} days in the past ({date_str}). Please verify."
+                elif delta < -7:
+                    date_warning = f"⚠️ WARNING: Invoice {i} date is in the future ({date_str}). Please verify."
+            except ValueError:
+                pass
+
+        prefix = f"*{i}. {supplier}*" if count > 1 else f"*{supplier}*"
+        lines.append(f"{prefix} — {date_str}")
+
+        for item in items:
+            desc = item.get("description") or "—"
+            qty  = item.get("quantity")    or "?"
+            unit = item.get("unit")        or ""
+            sub  = float(item.get("subtotal") or 0)
+            lines.append(f"     • {desc} x{qty}{' ' + unit if unit else ''} — €{sub:.2f}")
+
+        lines.append(f"     *Subtotal: €{total:.2f}*")
+        lines.append("")
+
+    if count > 1:
+        lines.append(f"*Grand Total: €{grand_total:.2f}*")
+        lines.append("")
+
+    if date_warning:
+        lines.append(date_warning)
+        lines.append("")
+
+    if failed > 0:
+        lines.append(f"⚠️ {failed} photo{'s' if failed > 1 else ''} could not be read.")
+        lines.append("")
+
+    lines.append("Reply *yes* / *ναι* / ✅ to save all.")
+    lines.append("Reply *no* / *cancel* to discard all.")
+
+    return "\n".join(lines)
+
+
 # ── Webhook endpoint ───────────────────────────────────────────────────────────
 
 CONFIRM_WORDS = {"yes", "ναι", "nai", "✅", "y", "confirm", "ok", "okay", "ок"}
 CANCEL_WORDS  = {"no",  "cancel", "όχι", "oxi", "discard", "n"}
 
 
-def process_invoice_background(from_number: str, media_url: str, content_type: str) -> None:
+def process_invoices_background(from_number: str, media_urls: list[str]) -> None:
     """
     Background task — runs after Twilio's 15s window has closed.
-    Downloads image, extracts with Claude, stores as pending, sends result via Twilio API.
+
+    For each URL:
+      1. Download image from Twilio
+      2. Extract with Claude Vision
+      3. Skip non-invoices and failed reads
+      4. Collect valid results
+
+    Then store the whole batch as a single pending row and send one consolidated reply.
+    Single image batches work identically — the list just has one entry.
     """
-    log.info("Background extraction starting for %s", from_number)
+    total = len(media_urls)
+    log.info("Background extraction starting — %d image(s) for %s", total, from_number)
 
-    result = download_twilio_image(media_url)
-    if not result:
+    if total > 1:
         send_whatsapp_message(from_number,
-            "❌ Could not download the image. Please try sending it again.")
-        return
+            f"⏳ Processing {total} invoices, give me a moment...")
 
-    image_bytes, detected_type = result
-    log.info("Downloaded image — %d bytes — %s", len(image_bytes), detected_type)
+    extracted_list = []
+    failed         = 0
+    not_invoices   = 0
 
-    extracted = extract_invoice_data(image_bytes, content_type)
-    if not extracted:
-        send_whatsapp_message(from_number,
-            "❌ Could not read the invoice. "
-            "Please make sure the photo is clear and well-lit, then try again.")
-        return
+    for i, url in enumerate(media_urls):
+        log.info("Processing image %d/%d", i + 1, total)
 
-    if extracted.get("_overloaded"):
-        send_whatsapp_message(from_number,
-            "⏳ The system is busy right now. Please send the photo again in a moment.")
-        return
+        result = download_twilio_image(url)
+        if not result:
+            log.warning("Failed to download image %d", i + 1)
+            failed += 1
+            continue
 
-    if extracted.get("_not_invoice"):
-        doc_type = extracted.get("document_type", "unknown document")
-        send_whatsapp_message(from_number,
-            f"❌ This doesn't look like an invoice.\n\n"
-            f"Detected: {doc_type}\n\n"
-            f"Please send a supplier invoice or delivery note with products and a total amount.")
+        image_bytes, content_type = result
+        log.info("Downloaded image %d — %d bytes — %s", i + 1, len(image_bytes), content_type)
+
+        extracted = extract_invoice_data(image_bytes, content_type)
+
+        if not extracted:
+            log.warning("Extraction failed for image %d", i + 1)
+            failed += 1
+            continue
+
+        if extracted.get("_overloaded"):
+            send_whatsapp_message(from_number,
+                "⏳ The system is busy right now. Please send the photos again in a moment.")
+            return
+
+        if extracted.get("_not_invoice"):
+            doc_type = extracted.get("document_type", "unknown document")
+            log.info("Image %d is not an invoice: %s", i + 1, doc_type)
+            not_invoices += 1
+            continue
+
+        extracted_list.append(extracted)
+
+    # All images failed or were non-invoices
+    if not extracted_list:
+        if not_invoices > 0 and failed == 0:
+            send_whatsapp_message(from_number,
+                f"❌ None of the {total} photos appear to be invoices.\n\n"
+                f"Please send supplier invoices or delivery notes with products and a total amount.")
+        else:
+            send_whatsapp_message(from_number,
+                "❌ Could not read any of the invoices. "
+                "Please make sure the photos are clear and well-lit, then try again.")
         return
 
     try:
         conn = get_conn()
         init_invoice_tables(conn)
-        store_pending(conn, from_number, extracted)
+        store_pending(conn, from_number, extracted_list)
         conn.close()
     except Exception as e:
-        log.error("DB error in background task: %s", e)
+        log.error("DB error storing pending invoices: %s", e)
         send_whatsapp_message(from_number, "⚠️ System error — please try again.")
         return
 
-    summary = format_summary(extracted)
+    # Use single-invoice format for clean display when only one came through
+    if len(extracted_list) == 1 and not_invoices == 0 and failed == 0:
+        summary = format_summary(extracted_list[0])
+    else:
+        summary = format_multi_summary(extracted_list, failed)
+
     send_whatsapp_message(from_number, summary)
-    log.info("Background extraction complete for %s", from_number)
+    log.info("Background extraction complete — %d ok, %d failed, %d non-invoices",
+             len(extracted_list), failed, not_invoices)
 
 
 @router.post("/whatsapp", response_class=PlainTextResponse)
 async def whatsapp_webhook(
-    background_tasks:  BackgroundTasks,
-    From:              str           = Form(...),
-    Body:              str           = Form(default=""),
-    NumMedia:          Optional[str] = Form(default="0"),
-    MediaUrl0:         Optional[str] = Form(default=None),
-    MediaContentType0: Optional[str] = Form(default="image/jpeg"),
+    request:          Request,
+    background_tasks: BackgroundTasks,
+    From:             str           = Form(...),
+    Body:             str           = Form(default=""),
+    NumMedia:         Optional[str] = Form(default="0"),
 ):
     """
     Twilio calls this endpoint every time a WhatsApp message arrives.
 
     Two cases:
-      1. Image → reply instantly to Twilio, extract in background, send result via API
-      2. Text  → check for confirmation or cancellation of a pending invoice
+      1. Image(s) → reply to Twilio instantly (beat 15s timeout),
+                    process all images in background, send result via REST API.
+      2. Text     → check for yes/no confirmation of a pending invoice batch.
     """
     from_number = From.strip()
     body_text   = Body.strip().lower()
     num_media   = int(NumMedia or "0")
 
-    log.info("WhatsApp message from %s | media=%s | body='%s'", from_number, num_media, Body[:50])
+    log.info("WhatsApp from %s | media=%d | body='%s'", from_number, num_media, Body[:60])
 
-    # ── Case 1: Image received → reply immediately, process in background ─────
-    if num_media > 0 and MediaUrl0:
-        background_tasks.add_task(
-            process_invoice_background,
-            from_number,
-            MediaUrl0,
-            MediaContentType0 or "image/jpeg",
-        )
-        return twiml_reply("📸 Got your invoice! Reading it now, I'll message you back in a moment...")
+    # ── Case 1: Image(s) received ─────────────────────────────────────────────
+    if num_media > 0:
+        # Read all media URLs from the raw form data dynamically.
+        # Works for 1 image (MediaUrl0 only) or up to 10 (Twilio's WhatsApp limit).
+        form_data  = await request.form()
+        media_urls = [
+            str(form_data[f"MediaUrl{i}"])
+            for i in range(num_media)
+            if f"MediaUrl{i}" in form_data
+        ]
 
-    # ── Case 2: Text message → confirmation or cancellation ───────────────────
+        if not media_urls:
+            return twiml_reply("❌ No images found in the message. Please try again.")
+
+        background_tasks.add_task(process_invoices_background, from_number, media_urls)
+
+        count_word = f"{len(media_urls)} invoice{'s' if len(media_urls) > 1 else ''}"
+        return twiml_reply(f"📸 Got your {count_word}! Reading now, I'll message you back shortly...")
+
+    # ── Case 2: Text message — confirmation or cancellation ───────────────────
     try:
         conn = get_conn()
         init_invoice_tables(conn)
@@ -689,36 +833,65 @@ async def whatsapp_webhook(
             "👋 Send me a photo of an invoice and I'll extract the details for you."
         )
 
-    # Confirmation
-    if body_text in CONFIRM_WORDS:
-        try:
-            delivery_id = save_delivery(conn, pending["data"])
-            update_inventory_for_delivery(conn, delivery_id, pending["data"].get("items") or [])
-            confirm_pending(conn, pending["id"])
-            conn.close()
-            supplier = pending["data"].get("supplier_name") or "supplier"
-            total    = pending["data"].get("total") or 0
-            return twiml_reply(
-                f"✅ Saved!\n\n"
-                f"Delivery from *{supplier}* — €{total:.2f} — recorded in the dashboard."
-            )
-        except Exception as e:
-            log.error("Failed to save delivery: %s", e)
-            conn.close()
-            return twiml_reply("⚠️ Error saving the delivery. Please try again.")
+    pending_id     = pending["id"]
+    extracted_data = pending["data"]
 
-    # Cancellation
+    # Normalise — always work with a list, even if stored as a single dict (legacy rows)
+    invoices = extracted_data if isinstance(extracted_data, list) else [extracted_data]
+
+    # ── Confirmed ─────────────────────────────────────────────────────────────
+    if body_text in CONFIRM_WORDS:
+        saved   = 0
+        skipped = 0
+        errors  = 0
+
+        for data in invoices:
+            try:
+                delivery_id = save_delivery(conn, data)
+
+                if delivery_id is None:
+                    # is_duplicate returned True — already in supplier_deliveries
+                    skipped += 1
+                    continue
+
+                items = data.get("items") or []
+                if items:
+                    try:
+                        update_inventory_for_delivery(conn, delivery_id, items)
+                    except Exception as e:
+                        log.error("Inventory update failed for delivery %d: %s", delivery_id, e)
+
+                saved += 1
+
+            except Exception as e:
+                log.error("Failed to save delivery: %s", e)
+                errors += 1
+
+        confirm_pending(conn, pending_id)
+        conn.close()
+
+        parts = []
+        if saved:
+            parts.append(f"✅ {saved} invoice{'s' if saved > 1 else ''} saved successfully.")
+        if skipped:
+            parts.append(f"⚠️ {skipped} skipped — already exist in the system (same supplier, date and total).")
+        if errors:
+            parts.append(f"❌ {errors} failed to save — check the logs.")
+
+        return twiml_reply("\n\n".join(parts) if parts else "✅ Done.")
+
+    # ── Cancelled ─────────────────────────────────────────────────────────────
     if body_text in CANCEL_WORDS:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE pending_invoices SET status = 'cancelled' WHERE id = %s",
-                (pending["id"],)
+                (pending_id,)
             )
         conn.commit()
         conn.close()
         return twiml_reply("🗑️ Invoice discarded. Send a new photo when ready.")
 
-    # Unrecognised text while a pending invoice exists
+    # ── Unrecognised text while a pending invoice exists ──────────────────────
     conn.close()
     return twiml_reply(
         "Reply *yes* to save or *no* to discard the last invoice.\n"
