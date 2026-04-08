@@ -4,7 +4,7 @@ Run with: streamlit run dashboard.py
 """
 
 import os
-from datetime import date
+from datetime import date, datetime, timedelta
 import pandas as pd
 import psycopg2
 import streamlit as st
@@ -311,6 +311,28 @@ def delete_delivery_with_reversal(delivery_id):
     finally:
         conn.close()
 
+
+def mark_all_paid(supplier_name):
+    """Mark all unpaid deliveries for a supplier as paid."""
+    conn = get_conn()
+    if not conn:
+        return False, "Could not connect to database."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE supplier_deliveries SET paid = TRUE
+                WHERE LOWER(TRIM(supplier_name)) = LOWER(TRIM(%s)) AND paid = FALSE
+            """, (supplier_name,))
+            count = cur.rowcount
+        conn.commit()
+        return True, f"Marked {count} deliveries as paid for {supplier_name}."
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
+
+
 # ── Navigation ─────────────────────────────────────────────────────────────────
 
 page = st.sidebar.selectbox(
@@ -414,7 +436,7 @@ if page == "Home":
         st.markdown("Staff overview, salary distribution by role, monthly payroll vs revenue.")
     with c3:
         st.markdown("#### 🧾 Expenses")
-        st.markdown("Monthly fixed costs by category, add/edit/delete expenses from the dashboard.")
+        st.markdown("Monthly fixed costs by category, stacked historical chart, add/edit/delete expenses from the dashboard.")
 
     c4, c5, c6 = st.columns(3)
     with c4:
@@ -891,194 +913,288 @@ elif page == "Expenses":
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE: SUPPLIERS
+# PAGE: SUPPLIERS (REDESIGNED — supplier-first, aging buckets, combined audit)
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif page == "Suppliers":
+    import plotly.graph_objects as go
+
     st.title("Sova Bistrot — Suppliers")
 
     deliveries = load_supplier_data()
 
-    if deliveries is not None and not deliveries.empty:
+    if deliveries is None or deliveries.empty:
+        st.info("No deliveries recorded yet. Add your first delivery below or send an invoice photo via WhatsApp.")
 
-        all_months     = sorted(deliveries["month"].unique(), reverse=True)
-        col_month, _   = st.columns([2, 4])
-        with col_month:
-            selected_month = st.selectbox(
-                "Viewing month", options=all_months,
-                format_func=lambda m: m.strftime("%B %Y")
-            )
+    else:
+        today = date.today()
 
-        month_del = deliveries[deliveries["month"] == selected_month]
-        prev_del  = deliveries[deliveries["month"] < selected_month]
+        # ── Helper: compute aging bucket for one unpaid delivery ───────────────
+        def aging_bucket(delivery_date) -> str:
+            days = (today - delivery_date).days
+            if days <= 30:
+                return "0–30"
+            elif days <= 60:
+                return "31–60"
+            elif days <= 90:
+                return "61–90"
+            else:
+                return "90+"
 
-        total_ordered      = float(month_del["amount"].sum())
-        total_paid_month   = float(month_del[month_del["paid"] == True]["amount"].sum())
-        total_owed_month   = total_ordered - total_paid_month
-        total_carried_over = float(prev_del[prev_del["paid"] == False]["amount"].sum()) if not prev_del.empty else 0.0
-        total_outstanding  = total_owed_month + total_carried_over
+        # ── All-time supplier summary ─────────────────────────────────────────
+        unpaid = deliveries[deliveries["paid"] == False].copy()
+        if not unpaid.empty:
+            unpaid["aging"] = unpaid["delivery_date"].apply(aging_bucket)
 
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("This Month Ordered",  f"€{total_ordered:,.2f}")
-        k2.metric("Paid This Month",     f"€{total_paid_month:,.2f}")
-        k3.metric("This Month Owed",     f"€{total_owed_month:,.2f}")
-        k4.metric("Carried Over",        f"€{total_carried_over:,.2f}", help="Unpaid from previous months")
-        k5.metric("Total Outstanding",   f"€{total_outstanding:,.2f}", help="This month + carried over")
-
-        # Recent Ingestions
-        st.divider()
-        st.subheader("🕐 Recent Ingestions")
-        st.caption("Last 20 deliveries added to the system, most recent first.")
-
-        @st.cache_data(ttl=10)
-        def load_recent_ingestions():
-            conn = get_conn()
-            if not conn:
-                return None
-            try:
-                return pd.read_sql("""
-                    SELECT
-                        created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Copenhagen' AS ingested_at,
-                        supplier_name,
-                        delivery_date,
-                        amount,
-                        description,
-                        paid
-                    FROM supplier_deliveries
-                    ORDER BY created_at DESC
-                    LIMIT 20
-                """, conn)
-            except Exception:
-                return None
-            finally:
-                conn.close()
-
-        recent = load_recent_ingestions()
-
-        if recent is not None and not recent.empty:
-            recent["ingested_at"]  = pd.to_datetime(recent["ingested_at"]).dt.strftime("%Y-%m-%d %H:%M")
-            recent["amount"]       = recent["amount"].apply(lambda x: f"€{x:,.2f}")
-            recent["paid"]         = recent["paid"].apply(lambda x: "✅" if x else "—")
-            recent["description"]  = recent["description"].fillna("—")
-            recent.columns         = ["Saved At", "Supplier", "Invoice Date", "Amount", "Description", "Paid"]
-            st.dataframe(recent, use_container_width=True, hide_index=True)
-        else:
-            st.info("No deliveries recorded yet.")
-
-        # Supplier Balance
-        st.divider()
-        st.subheader(f"Supplier Balance — {selected_month.strftime('%B %Y')}")
-        st.caption("Carried Over = unpaid deliveries from all previous months per supplier")
-
-        all_suppliers = deliveries["supplier_name"].unique()
+        all_suppliers = sorted(deliveries["supplier_name"].unique())
         summary_rows  = []
 
-        for supplier in sorted(all_suppliers):
-            sup_month = month_del[month_del["supplier_name"] == supplier]
-            sup_prev  = prev_del[prev_del["supplier_name"] == supplier] if not prev_del.empty else pd.DataFrame()
+        for supplier in all_suppliers:
+            sup_all    = deliveries[deliveries["supplier_name"] == supplier]
+            sup_unpaid = unpaid[unpaid["supplier_name"] == supplier] if not unpaid.empty else pd.DataFrame()
 
-            this_ordered = float(sup_month["amount"].sum())
-            this_paid    = float(sup_month[sup_month["paid"] == True]["amount"].sum()) if not sup_month.empty else 0.0
-            this_owed    = this_ordered - this_paid
-            carried      = float(sup_prev[sup_prev["paid"] == False]["amount"].sum()) if not sup_prev.empty else 0.0
-            total_owed_s = this_owed + carried
+            total_ordered = float(sup_all["amount"].sum())
+            total_paid    = float(sup_all[sup_all["paid"] == True]["amount"].sum())
+            total_owed    = total_ordered - total_paid
+            num_deliveries = len(sup_all)
+            last_delivery  = sup_all["delivery_date"].max()
 
-            if this_ordered > 0 or carried > 0:
-                summary_rows.append({
-                    "Supplier":              supplier,
-                    "Deliveries":            len(sup_month),
-                    "Monthly Total (€)":     f"€{this_ordered:,.2f}",
-                    "Paid (€)":              f"€{this_paid:,.2f}",
-                    "This Month Owed (€)":   f"€{this_owed:,.2f}",
-                    "Carried Over (€)":      f"€{carried:,.2f}",
-                    "Total Outstanding (€)": f"€{total_owed_s:,.2f}",
-                })
+            # Aging buckets
+            b_0_30  = float(sup_unpaid[sup_unpaid["aging"] == "0–30"]["amount"].sum())  if not sup_unpaid.empty else 0
+            b_31_60 = float(sup_unpaid[sup_unpaid["aging"] == "31–60"]["amount"].sum()) if not sup_unpaid.empty else 0
+            b_61_90 = float(sup_unpaid[sup_unpaid["aging"] == "61–90"]["amount"].sum()) if not sup_unpaid.empty else 0
+            b_90p   = float(sup_unpaid[sup_unpaid["aging"] == "90+"]["amount"].sum())   if not sup_unpaid.empty else 0
 
-        if summary_rows:
-            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+            summary_rows.append({
+                "Supplier":        supplier,
+                "Deliveries":      num_deliveries,
+                "Total Ordered":   total_ordered,
+                "Total Paid":      total_paid,
+                "Outstanding":     total_owed,
+                "0–30 days":       b_0_30,
+                "31–60 days":      b_31_60,
+                "61–90 days":      b_61_90,
+                "90+ days":        b_90p,
+                "Last Delivery":   last_delivery,
+            })
 
-        # Delivery Log
+        summary_df = pd.DataFrame(summary_rows).sort_values("Outstanding", ascending=False)
+
+        # ── KPIs (3 meaningful ones) ──────────────────────────────────────────
+        total_outstanding_all = float(summary_df["Outstanding"].sum())
+        this_month_spend      = float(deliveries[
+            deliveries["delivery_date"].apply(lambda d: d.year == today.year and d.month == today.month)
+        ]["amount"].sum()) if not deliveries.empty else 0.0
+        suppliers_with_debt   = int((summary_df["Outstanding"] > 0).sum())
+
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Total Outstanding (all-time)", f"€{total_outstanding_all:,.2f}",
+                  help="Sum of all unpaid deliveries across all suppliers and all months")
+        k2.metric("This Month's Spend", f"€{this_month_spend:,.2f}",
+                  help="Total deliveries received in the current calendar month")
+        k3.metric("Suppliers with Unpaid Balance", f"{suppliers_with_debt}",
+                  help="Number of suppliers you currently owe money to")
+
+        # ── Top 5 Outstanding callout ─────────────────────────────────────────
+        top5 = summary_df[summary_df["Outstanding"] > 0].head(5)
+        if not top5.empty:
+            st.divider()
+            st.subheader("Top Outstanding Balances")
+            top_cols = st.columns(min(len(top5), 5))
+            for i, (_, row) in enumerate(top5.iterrows()):
+                with top_cols[i]:
+                    urgent_label = ""
+                    if row["90+ days"] > 0:
+                        urgent_label = "🔴"
+                    elif row["61–90 days"] > 0:
+                        urgent_label = "🟠"
+                    elif row["31–60 days"] > 0:
+                        urgent_label = "🟡"
+                    else:
+                        urgent_label = "🟢"
+                    st.metric(
+                        f"{urgent_label} {row['Supplier']}",
+                        f"€{row['Outstanding']:,.2f}",
+                        delta=f"{int(row['Deliveries'])} deliveries",
+                        delta_color="off",
+                    )
+
+        # ── Aging Analysis Chart ──────────────────────────────────────────────
+        aged_suppliers = summary_df[summary_df["Outstanding"] > 0].copy()
+        if not aged_suppliers.empty:
+            st.divider()
+            st.subheader("Aging Analysis")
+            st.caption("How long your unpaid invoices have been outstanding, per supplier. Older = more urgent.")
+
+            fig_aging = go.Figure()
+            for bucket, color in [
+                ("0–30 days",  "#1a6b3a"),
+                ("31–60 days", "#e8b84b"),
+                ("61–90 days", "#d85a30"),
+                ("90+ days",   "#a32d2d"),
+            ]:
+                fig_aging.add_trace(go.Bar(
+                    x=aged_suppliers["Supplier"],
+                    y=aged_suppliers[bucket],
+                    name=bucket,
+                    marker_color=color,
+                    hovertemplate="<b>%{x}</b><br>" + bucket + ": €%{y:,.2f}<extra></extra>",
+                ))
+
+            fig_aging.update_layout(
+                barmode="stack",
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                font_color="#cccccc",
+                xaxis_title=None,
+                yaxis_title="Outstanding (€)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(t=40, b=20),
+            )
+            st.plotly_chart(fig_aging, use_container_width=True)
+
+        # ── Supplier Overview Table ───────────────────────────────────────────
         st.divider()
-        st.subheader(f"Delivery Log — {selected_month.strftime('%B %Y')}")
+        st.subheader("All Suppliers")
+        st.caption("Sorted by outstanding balance. Click a supplier below to see full delivery history.")
 
-        if month_del.empty:
-            st.info("No deliveries recorded for this month.")
-        else:
-            for supplier in sorted(month_del["supplier_name"].unique()):
-                sup_del   = month_del[month_del["supplier_name"] == supplier].sort_values("delivery_date")
-                sup_total = float(sup_del["amount"].sum())
-                sup_paid  = float(sup_del[sup_del["paid"] == True]["amount"].sum())
-                sup_owed  = sup_total - sup_paid
+        # Supplier search/filter
+        search_term = st.text_input("🔍 Search supplier", placeholder="Type to filter...")
 
-                with st.expander(
-                    f"**{supplier}** — {len(sup_del)} deliveries — "
-                    f"Monthly total: €{sup_total:,.2f} — Owed: €{sup_owed:,.2f}",
-                    expanded=True
-                ):
-                    h1, h2, h3, h4, h5 = st.columns([1.5, 3, 1.5, 1.2, 0.5])
-                    h1.markdown("**Date**")
-                    h2.markdown("**Description**")
-                    h3.markdown("**Amount**")
-                    h4.markdown("**Paid**")
-                    h5.markdown("**Del**")
+        display_df = summary_df.copy()
+        if search_term.strip():
+            display_df = display_df[
+                display_df["Supplier"].str.contains(search_term.strip(), case=False, na=False)
+            ]
 
-                    for _, row in sup_del.iterrows():
-                        c1, c2, c3, c4, c5 = st.columns([1.5, 3, 1.5, 1.2, 0.5])
-                        c1.write(str(row["delivery_date"]))
-                        c2.write(row["description"] or "—")
-                        c3.write(f"€{row['amount']:,.2f}")
+        # Format for display
+        fmt_df = display_df.copy()
+        for col in ["Total Ordered", "Total Paid", "Outstanding", "0–30 days", "31–60 days", "61–90 days", "90+ days"]:
+            fmt_df[col] = fmt_df[col].apply(lambda x: f"€{x:,.2f}" if x > 0 else "—")
+        fmt_df["Last Delivery"] = fmt_df["Last Delivery"].astype(str)
 
-                        paid_toggle = c4.checkbox("Paid", value=bool(row["paid"]), key=f"paid_{row['id']}")
-                        if paid_toggle != bool(row["paid"]):
-                            success, _ = toggle_paid(row["id"], paid_toggle)
+        st.dataframe(fmt_df, use_container_width=True, hide_index=True)
+
+        # ── Per-Supplier Drill-Down ───────────────────────────────────────────
+        st.divider()
+        st.subheader("Supplier Details")
+        st.caption("Expand a supplier to see all deliveries, toggle paid status, or settle the full balance.")
+
+        for _, sup_row in display_df.iterrows():
+            supplier = sup_row["Supplier"]
+            sup_del  = deliveries[deliveries["supplier_name"] == supplier].sort_values("delivery_date", ascending=False)
+            owed     = sup_row["Outstanding"]
+
+            status_icon = "🟢" if owed == 0 else ("🔴" if sup_row["90+ days"] > 0 else ("🟠" if sup_row["61–90 days"] > 0 else ("🟡" if sup_row["31–60 days"] > 0 else "🟢")))
+
+            with st.expander(
+                f"{status_icon} **{supplier}** — {len(sup_del)} deliveries — "
+                f"Total: €{float(sup_row['Total Ordered']):,.2f} — "
+                f"Outstanding: €{owed:,.2f}",
+                expanded=False,
+            ):
+                # Mark all paid button
+                if owed > 0:
+                    col_action, _ = st.columns([2, 4])
+                    with col_action:
+                        if st.button(f"✅ Mark all paid for {supplier}", key=f"markall_{supplier}"):
+                            success, message = mark_all_paid(supplier)
                             if success:
-                                st.cache_data.clear()
-                                st.rerun()
-
-                        if c5.button("🗑", key=f"del_{row['id']}"):
-                            success, message = delete_delivery(row["id"])
-                            if success:
+                                st.success(message)
                                 st.cache_data.clear()
                                 st.rerun()
                             else:
                                 st.error(message)
 
-                    st.markdown("---")
-                    f1, f2, f3 = st.columns([4.5, 1.5, 1.2])
-                    f1.markdown(f"**Monthly total for {supplier}**")
-                    f2.markdown(f"**€{sup_total:,.2f}**")
-                    f3.markdown(f"**Owed: €{sup_owed:,.2f}**")
+                # Optional month filter inside the drill-down
+                sup_months = sorted(sup_del["month"].unique(), reverse=True)
+                if len(sup_months) > 1:
+                    filter_options = ["All months"] + [m.strftime("%B %Y") for m in sup_months]
+                    month_choice = st.selectbox(
+                        "Filter by month", options=filter_options,
+                        key=f"month_filter_{supplier}"
+                    )
+                    if month_choice != "All months":
+                        chosen_period = [m for m in sup_months if m.strftime("%B %Y") == month_choice][0]
+                        sup_del = sup_del[sup_del["month"] == chosen_period]
 
-        # Historical Pivot
+                # Delivery rows
+                h1, h2, h3, h4, h5 = st.columns([1.5, 3, 1.5, 1.2, 0.5])
+                h1.markdown("**Date**")
+                h2.markdown("**Description**")
+                h3.markdown("**Amount**")
+                h4.markdown("**Paid**")
+                h5.markdown("**Del**")
+
+                for _, row in sup_del.iterrows():
+                    c1, c2, c3, c4, c5 = st.columns([1.5, 3, 1.5, 1.2, 0.5])
+
+                    # Show aging indicator for unpaid
+                    date_str = str(row["delivery_date"])
+                    if not row["paid"]:
+                        days_old = (today - row["delivery_date"]).days
+                        if days_old > 90:
+                            date_str = f"🔴 {date_str}"
+                        elif days_old > 60:
+                            date_str = f"🟠 {date_str}"
+                        elif days_old > 30:
+                            date_str = f"🟡 {date_str}"
+
+                    c1.write(date_str)
+                    c2.write(row["description"] or "—")
+                    c3.write(f"€{row['amount']:,.2f}")
+
+                    paid_toggle = c4.checkbox("Paid", value=bool(row["paid"]), key=f"paid_{row['id']}")
+                    if paid_toggle != bool(row["paid"]):
+                        success, _ = toggle_paid(row["id"], paid_toggle)
+                        if success:
+                            st.cache_data.clear()
+                            st.rerun()
+
+                    if c5.button("🗑", key=f"del_{row['id']}"):
+                        success, message = delete_delivery(row["id"])
+                        if success:
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(message)
+
+                # Supplier totals footer
+                sup_total = float(sup_del["amount"].sum())
+                sup_paid  = float(sup_del[sup_del["paid"] == True]["amount"].sum())
+                sup_owed  = sup_total - sup_paid
+                st.markdown("---")
+                f1, f2, f3 = st.columns([4.5, 1.5, 1.2])
+                f1.markdown(f"**Total ({len(sup_del)} deliveries)**")
+                f2.markdown(f"**€{sup_total:,.2f}**")
+                f3.markdown(f"**Owed: €{sup_owed:,.2f}**")
+
+        # ── Historical Pivot Table ────────────────────────────────────────────
         st.divider()
-        st.subheader("Supplier Expenses — All Months")
-        st.caption("Total deliveries per supplier per month (€)")
+        with st.expander("📊 Full History Matrix", expanded=False):
+            st.caption("Total deliveries per supplier per month (€)")
+            pivot                = deliveries.copy()
+            pivot["month_label"] = pivot["month"].apply(lambda m: m.strftime("%b %Y"))
+            pivot_table          = pivot.pivot_table(index="supplier_name", columns="month_label",
+                                                     values="amount", aggfunc="sum", fill_value=0)
+            month_order          = sorted(pivot["month"].unique())
+            col_order            = [m.strftime("%b %Y") for m in month_order]
+            pivot_table          = pivot_table.reindex(columns=col_order, fill_value=0)
+            pivot_table["Total"] = pivot_table.sum(axis=1)
+            total_row            = pivot_table.sum(axis=0)
+            total_row.name       = "TOTAL"
+            pivot_table          = pd.concat([pivot_table, total_row.to_frame().T])
+            formatted            = pivot_table.map(lambda x: f"€{x:,.2f}" if x > 0 else "—")
+            formatted.index.name = "Supplier"
+            st.dataframe(formatted, use_container_width=True)
 
-        pivot                = deliveries.copy()
-        pivot["month_label"] = pivot["month"].apply(lambda m: m.strftime("%b %Y"))
-        pivot_table          = pivot.pivot_table(index="supplier_name", columns="month_label",
-                                                 values="amount", aggfunc="sum", fill_value=0)
-        month_order          = sorted(pivot["month"].unique())
-        col_order            = [m.strftime("%b %Y") for m in month_order]
-        pivot_table          = pivot_table.reindex(columns=col_order, fill_value=0)
-        pivot_table["Total"] = pivot_table.sum(axis=1)
-        total_row            = pivot_table.sum(axis=0)
-        total_row.name       = "TOTAL"
-        pivot_table          = pd.concat([pivot_table, total_row.to_frame().T])
-        formatted            = pivot_table.map(lambda x: f"€{x:,.2f}" if x > 0 else "—")
-        formatted.index.name = "Supplier"
-        st.dataframe(formatted, use_container_width=True)
-
-    else:
-        st.info("No deliveries recorded yet. Add your first delivery below.")
-
-    # Ingestion Audit Log
+    # ── Ingestion Tracking (combined Recent + Audit with tabs) ────────────────
     st.divider()
-    st.subheader("📋 Ingestion Audit Log")
-    st.caption("All deliveries saved via WhatsApp, grouped by supplier. Delete here to correct mistakes — inventory will be reversed automatically.")
+    st.subheader("📋 Ingestion Tracking")
+    st.caption("Track what you've added and correct mistakes. Deleting reverses inventory automatically.")
 
     @st.cache_data(ttl=10)
-    def load_audit_log():
+    def load_ingestion_data():
         conn = get_conn()
         if not conn:
             return None
@@ -1105,38 +1221,38 @@ elif page == "Suppliers":
         finally:
             conn.close()
 
-    audit = load_audit_log()
+    ingestion_data = load_ingestion_data()
 
-    if audit is None or audit.empty:
+    if ingestion_data is None or ingestion_data.empty:
         st.info("No deliveries recorded yet.")
     else:
-        for supplier in sorted(audit["supplier_name"].unique()):
-            sup_audit = audit[audit["supplier_name"] == supplier].sort_values("delivery_date", ascending=False)
-            sup_total = float(sup_audit["amount"].sum())
-            sup_count = len(sup_audit)
+        tab_recent, tab_by_supplier = st.tabs(["🕐 Recent", "📦 By Supplier"])
 
-            with st.expander(
-                f"**{supplier}** — {sup_count} deliveries — Total: €{sup_total:,.2f}",
-                expanded=False
-            ):
-                h1, h2, h3, h4, h5 = st.columns([2, 2, 1.5, 1, 0.5])
-                h1.markdown("**Date**")
-                h2.markdown("**Description**")
-                h3.markdown("**Amount**")
-                h4.markdown("**Items**")
-                h5.markdown("**Del**")
+        # ── Tab 1: Recent (flat chronological list) ───────────────────────────
+        with tab_recent:
+            st.caption("Last 20 deliveries added, most recent first.")
+            recent = ingestion_data.head(20).copy()
 
-                for _, row in sup_audit.iterrows():
-                    c1, c2, c3, c4, c5 = st.columns([2, 2, 1.5, 1, 0.5])
-                    c1.write(str(row["delivery_date"]))
-                    c1.caption(f"Saved: {pd.to_datetime(row['created_at']).strftime('%Y-%m-%d %H:%M')}")
-                    c2.write(row["description"] or "—")
-                    c3.write(f"€{float(row['amount']):,.2f}")
-                    c3.caption("✅ Paid" if row["paid"] else "⏳ Unpaid")
-                    c4.write(f"{int(row['item_count'])} items")
+            for _, row in recent.iterrows():
+                col_info, col_meta, col_del = st.columns([4, 2, 0.5])
 
-                    if c5.button("🗑", key=f"audit_del_{row['id']}",
-                                  help="Delete this mistake and reverse inventory"):
+                with col_info:
+                    paid_icon = "✅" if row["paid"] else "⏳"
+                    st.markdown(
+                        f"**{row['supplier_name']}** — €{float(row['amount']):,.2f} {paid_icon}"
+                    )
+                    st.caption(
+                        f"Invoice: {row['delivery_date']}  •  "
+                        f"{int(row['item_count'])} items  •  "
+                        f"{row['description'] or '—'}"
+                    )
+
+                with col_meta:
+                    st.caption(f"Saved: {pd.to_datetime(row['created_at']).strftime('%Y-%m-%d %H:%M')}")
+
+                with col_del:
+                    if st.button("🗑", key=f"recent_del_{row['id']}",
+                                  help="Delete and reverse inventory"):
                         success, message = delete_delivery_with_reversal(row["id"])
                         if success:
                             st.success(message)
@@ -1145,7 +1261,51 @@ elif page == "Suppliers":
                         else:
                             st.error(f"Error: {message}")
 
-    # Add Delivery
+                st.markdown("<hr style='margin:4px 0; border:none; border-top:1px solid #333;'>",
+                            unsafe_allow_html=True)
+
+        # ── Tab 2: By Supplier (grouped expanders) ────────────────────────────
+        with tab_by_supplier:
+            st.caption("Grouped by supplier. Use this to find and correct specific entries.")
+
+            for supplier in sorted(ingestion_data["supplier_name"].unique()):
+                sup_audit = ingestion_data[ingestion_data["supplier_name"] == supplier].sort_values(
+                    "delivery_date", ascending=False
+                )
+                sup_total = float(sup_audit["amount"].sum())
+                sup_count = len(sup_audit)
+
+                with st.expander(
+                    f"**{supplier}** — {sup_count} deliveries — Total: €{sup_total:,.2f}",
+                    expanded=False
+                ):
+                    h1, h2, h3, h4, h5 = st.columns([2, 2, 1.5, 1, 0.5])
+                    h1.markdown("**Date**")
+                    h2.markdown("**Description**")
+                    h3.markdown("**Amount**")
+                    h4.markdown("**Items**")
+                    h5.markdown("**Del**")
+
+                    for _, row in sup_audit.iterrows():
+                        c1, c2, c3, c4, c5 = st.columns([2, 2, 1.5, 1, 0.5])
+                        c1.write(str(row["delivery_date"]))
+                        c1.caption(f"Saved: {pd.to_datetime(row['created_at']).strftime('%Y-%m-%d %H:%M')}")
+                        c2.write(row["description"] or "—")
+                        c3.write(f"€{float(row['amount']):,.2f}")
+                        c3.caption("✅ Paid" if row["paid"] else "⏳ Unpaid")
+                        c4.write(f"{int(row['item_count'])} items")
+
+                        if c5.button("🗑", key=f"audit_del_{row['id']}",
+                                      help="Delete this mistake and reverse inventory"):
+                            success, message = delete_delivery_with_reversal(row["id"])
+                            if success:
+                                st.success(message)
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error(f"Error: {message}")
+
+    # ── Add Delivery ──────────────────────────────────────────────────────────
     st.divider()
     st.subheader("Add Delivery")
 
@@ -1170,6 +1330,7 @@ elif page == "Suppliers":
                 st.rerun()
             else:
                 st.error(f"Error: {message}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: INVENTORY
