@@ -603,7 +603,11 @@ def format_summary(data: dict) -> str:
         lines.append("")
 
     lines.append(f"*Supplier:* {supplier}")
-    lines.append(f"*Date:* {date_str}")
+    try:
+        date_display = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        date_display = date_str
+    lines.append(f"*Date:* {date_display}")
     if inv_num:
         lines.append(f"*Invoice #:* {inv_num}")
 
@@ -623,6 +627,11 @@ def format_summary(data: dict) -> str:
     lines.append("")
     lines.append("Reply *yes* or *ναι* or ✅ to save.")
     lines.append("Reply *no* or *cancel* to discard.")
+    lines.append("")
+    lines.append("✏️ To correct a field reply:")
+    lines.append("  date 06/04/2026")
+    lines.append("  total 62.47")
+    lines.append("  supplier Name Here")
 
     return "\n".join(lines)
 
@@ -656,7 +665,11 @@ def format_multi_summary(invoices: list[dict], failed: int = 0) -> str:
                 pass
 
         prefix = f"*{i}. {supplier}*" if count > 1 else f"*{supplier}*"
-        lines.append(f"{prefix} — {date_str}")
+        try:
+            date_display = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            date_display = date_str
+        lines.append(f"{prefix} — {date_display}")
 
         for item in items:
             desc = item.get("description") or "—"
@@ -682,9 +695,60 @@ def format_multi_summary(invoices: list[dict], failed: int = 0) -> str:
 
     lines.append("Reply *yes* / *ναι* / ✅ to save all.")
     lines.append("Reply *no* / *cancel* to discard all.")
+    lines.append("")
+    lines.append("✏️ To correct a field reply:")
+    lines.append("  date 06/04/2026")
+    lines.append("  total 62.47")
+    lines.append("  supplier Name Here")
 
     return "\n".join(lines)
 
+
+
+# ── Correction helpers ─────────────────────────────────────────────────────────
+
+CORRECTION_FIELDS = {
+    "date":     "invoice_date",
+    "total":    "total",
+    "supplier": "supplier_name",
+    "invoice":  "invoice_number",
+}
+
+
+def parse_correction(keyword: str, raw_value: str):
+    """Parse and validate a correction value. Returns the cleaned value or None on failure."""
+    raw_value = raw_value.strip()
+
+    if keyword == "date":
+        # Accept DD/MM/YYYY, DD/MM/YY, DD.MM.YYYY, DD.MM.YY
+        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d.%m.%Y", "%d.%m.%y"):
+            try:
+                parsed = datetime.strptime(raw_value, fmt)
+                return parsed.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return None
+
+    if keyword == "total":
+        try:
+            return float(raw_value.replace(",", ".").replace("€", "").strip())
+        except ValueError:
+            return None
+
+    # supplier / invoice — free text, just return as-is
+    return raw_value if raw_value else None
+
+
+def apply_correction(conn, pending_id: int, invoices: list, json_field: str, value) -> None:
+    """Apply a field correction to all invoices in the pending batch."""
+    for inv in invoices:
+        inv[json_field] = value
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE pending_invoices SET extracted_data = %s WHERE id = %s",
+            (json.dumps(invoices), pending_id)
+        )
+    conn.commit()
 
 # ── Webhook endpoint ───────────────────────────────────────────────────────────
 
@@ -834,6 +898,28 @@ async def whatsapp_webhook(
 
     # Always work with a list
     invoices = extracted_data if isinstance(extracted_data, list) else [extracted_data]
+
+    # ── Correction command? (e.g. "date 06/04/2026" or "total 62.47") ─────────
+    for keyword, json_field in CORRECTION_FIELDS.items():
+        if body_text.startswith(keyword + " "):
+            raw_value = Body.strip()[len(keyword):].strip()
+            corrected = parse_correction(keyword, raw_value)
+            if corrected is None:
+                conn.close()
+                return twiml_reply(
+                    f"⚠️ Couldn't parse that value for *{keyword}*.\n"
+                    f"Examples:\n"
+                    f"  date 06/04/2026\n"
+                    f"  total 62.47\n"
+                    f"  supplier Mouzouros Trading"
+                )
+            apply_correction(conn, pending_id, invoices, json_field, corrected)
+            display = corrected if keyword != "date" else datetime.strptime(corrected, "%Y-%m-%d").strftime("%d/%m/%Y")
+            conn.close()
+            return twiml_reply(
+                f"✏️ *{keyword.capitalize()}* updated to: {display}\n\n"
+                f"Reply *yes* to save or *no* to discard."
+            )
 
     # ── Confirmed ─────────────────────────────────────────────────────────────
     if body_text in CONFIRM_WORDS:
