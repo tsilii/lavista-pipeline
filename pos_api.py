@@ -32,13 +32,13 @@ MENU_ITEMS = [
 ]
 
 PAYMENT_METHODS = ["cash", "card", "contactless"]
-SERVERS         = ["Alice", "Bob", "Carlos", "Diana"]
+SERVERS         = ["Κωνσταντίνα", "Γκίκα", "Βασίλη Ποπόβ", "Γκερντούδη", "Μιχαέλα"]
 TABLES          = list(range(1, 13))  # tables 1–12
 
 # Weighted selections for realism
 ITEM_WEIGHTS    = [5, 3, 1, 4, 3, 4, 3, 3, 2, 5, 4, 5]
 PAYMENT_WEIGHTS = [1, 5, 4]   # cash rare, card and contactless dominate
-SERVER_WEIGHTS  = [4, 2, 3, 4]  # Alice and Diana busier
+SERVER_WEIGHTS  = [4, 3, 3, 3, 2]  # Κωνσταντίνα busier, 
 
 # Operating hours: 08:30 - 17:00
 OPEN_HOUR   = 8
