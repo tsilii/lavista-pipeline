@@ -169,6 +169,24 @@ def load_supplier_data():
         conn.close()
 
 
+@st.cache_data(ttl=10)
+def load_returns_data():
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        returns = pd.read_sql(
+            "SELECT * FROM supplier_returns ORDER BY return_date DESC", conn
+        )
+        if not returns.empty:
+            returns["return_date"] = pd.to_datetime(returns["return_date"]).dt.date
+        return returns
+    except Exception:
+        return None
+    finally:
+        conn.close() 
+
+
 # ── Write operations ───────────────────────────────────────────────────────────
 
 def add_expense(category, description, amount, month):
@@ -305,6 +323,26 @@ def delete_delivery_with_reversal(delivery_id):
 
         conn.commit()
         return True, f"Delivery #{delivery_id} deleted and inventory reversed."
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def add_return(supplier_name, return_date, amount, description):
+    conn = get_conn()
+    if not conn:
+        return False, "Could not connect to database."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO supplier_returns
+                    (supplier_name, return_date, amount, description)
+                VALUES (%s, %s, %s, %s)
+            """, (supplier_name.strip().title(), return_date, amount, description.strip() or None))
+        conn.commit()
+        return True, "Return invoice saved."
     except Exception as e:
         conn.rollback()
         return False, str(e)
@@ -973,6 +1011,9 @@ elif page == "Suppliers":
     st.title("Sova Bistrot — Suppliers")
 
     deliveries = load_supplier_data()
+    returns = load_returns_data()
+    if returns is None:
+        returns = pd.DataFrame()
     advances   = load_capital_advances()
 
     if deliveries is None or deliveries.empty:
@@ -1007,6 +1048,7 @@ elif page == "Suppliers":
 
             total_ordered  = float(sup_all["amount"].sum())
             total_paid     = float(sup_all[sup_all["paid"] == True]["amount"].sum())
+            total_returned = float(returns[returns["supplier_name"] == supplier]["amount"].sum()) if not returns.empty else 0.0
             num_deliveries = len(sup_all)
             last_delivery  = sup_all["delivery_date"].max()
 
@@ -1014,7 +1056,7 @@ elif page == "Suppliers":
                 advances["supplier_name"].str.lower().str.strip() == supplier.lower().strip()
             ]["amount"].sum()) if not advances.empty else 0.0
 
-            total_owed = total_ordered - total_paid - sup_advances_total
+            total_owed     = total_ordered - total_paid - total_returned
 
             # Aging buckets
             b_0_30  = float(sup_unpaid[sup_unpaid["aging"] == "0–30"]["amount"].sum())  if not sup_unpaid.empty else 0
@@ -1281,6 +1323,25 @@ elif page == "Suppliers":
                 f3.markdown(f"**Advances: €{sup_advances_total:,.2f}**")
                 f4.markdown(f"**Owed: €{sup_owed:,.2f}**")
 
+        # ── Returns ──────────────────────────────────────────────
+                sup_returns = returns[returns["supplier_name"] == supplier].sort_values("return_date", ascending=False) if not returns.empty else pd.DataFrame()
+
+                if not sup_returns.empty:
+                    st.markdown("#### ↩️ Return Invoices")
+                    rh1, rh2, rh3 = st.columns([1.5, 3, 1.5])
+                    rh1.markdown("**Date**")
+                    rh2.markdown("**Description**")
+                    rh3.markdown("**Amount**")
+
+                    for _, rrow in sup_returns.iterrows():
+                        rc1, rc2, rc3 = st.columns([1.5, 3, 1.5])
+                        rc1.write(str(rrow["return_date"]))
+                        rc2.write(rrow["description"] or "—")
+                        rc3.write(f"−€{float(rrow['amount']):,.2f}")
+
+                    sup_returned = float(sup_returns["amount"].sum())
+                    st.markdown(f"**Total returned: −€{sup_returned:,.2f}**")
+
         # ── Historical Pivot Table ────────────────────────────────────────────
         st.divider()
         with st.expander("📊 Full History Matrix", expanded=False):
@@ -1442,6 +1503,32 @@ elif page == "Suppliers":
                 st.rerun()
             else:
                 st.error(f"Error: {message}")
+
+    st.divider()
+    st.subheader("Add Return Invoice")
+
+    rcol1, rcol2 = st.columns(2)
+    with rcol1:
+        ret_supplier = st.text_input("Supplier name", placeholder="e.g. A&K Freshness", key="ret_supplier")
+        ret_date     = st.date_input("Return date", value=date.today(), key="ret_date")
+    with rcol2:
+        ret_amount   = st.number_input("Amount (€)", min_value=0.0, step=1.0, format="%.2f", key="ret_amount")
+        ret_desc     = st.text_input("Description (optional)", placeholder="e.g. Return Invoice 2717", key="ret_desc")
+
+    if st.button("Save Return Invoice", type="primary"):
+        if not ret_supplier.strip():
+            st.error("Please enter a supplier name.")
+        elif ret_amount <= 0:
+            st.error("Amount must be greater than zero.")
+        else:
+            success, message = add_return(ret_supplier, ret_date, ret_amount, ret_desc)
+            if success:
+                st.success(message)
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"Error: {message}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: INVENTORY
 # ══════════════════════════════════════════════════════════════════════════════

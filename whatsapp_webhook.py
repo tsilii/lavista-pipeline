@@ -99,6 +99,30 @@ def init_invoice_tables(conn) -> None:
             );
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS supplier_returns (
+                id              SERIAL PRIMARY KEY,
+                supplier_name   TEXT           NOT NULL,
+                return_date     DATE           NOT NULL,
+                amount          NUMERIC(10,2)  NOT NULL,
+                description     TEXT,
+                invoice_number  TEXT,
+                created_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW()
+            );
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS return_items (
+                id          SERIAL PRIMARY KEY,
+                return_id   INTEGER        NOT NULL
+                    REFERENCES supplier_returns(id) ON DELETE CASCADE,
+                description TEXT,
+                quantity    NUMERIC(10,3),
+                unit_price  NUMERIC(10,2),
+                subtotal    NUMERIC(10,2)
+            );
+        """)
+
     conn.commit()
     log.info("Invoice tables ready.")
 
@@ -112,10 +136,9 @@ Invoices may come from different suppliers with different layouts, in English or
 First check: is this document a supplier invoice or delivery note with products and a total amount?
 - YES → extract the data as instructed below
 - A document IS an invoice if it contains: a list of products/items, quantities, prices, and a total amount.
-- "Credit Invoice", "AR Invoice", "Sales Invoice", "Tax Invoice", "Delivery Note" are ALL valid invoices — extract them.
-- A "Credit Note" or "Credit Memo" that CANCELS a previous invoice and shows NEGATIVE amounts or items returned is NOT an invoice.
-- NO (it is a statement of account, bank statement, aged balance, or credit note cancelling a previous invoice) →
-  return exactly this JSON: {"_not_invoice": true, "document_type": "describe what it is in one sentence"}
+- A document titled "Return Invoice" or "Επιστροφή Τιμολόγιο" → extract it AND set "_is_return": true.
+- "Credit Invoice", "AR Invoice", "Sales Invoice", "Tax Invoice", "Delivery Note" are ALL regular invoices — set "_is_return": false.
+- A statement of account, bank statement, or aged balance → return {"_not_invoice": true, "document_type": "describe what it is in one sentence"}
 
 If it IS an invoice, extract the following and return ONLY valid JSON. No explanation, no markdown, no backticks.
 
@@ -124,6 +147,7 @@ Required JSON format:
   "supplier_name": "string or null",
   "invoice_date": "YYYY-MM-DD or null",
   "invoice_number": "string or null",
+  "_is_return": false,
   "items": [
     {
       "description": "string",
@@ -136,9 +160,31 @@ Required JSON format:
   "total": number or null
 }
 
+For return invoices:
+{
+  "supplier_name": "string or null",
+  "invoice_date": "YYYY-MM-DD or null",
+  "invoice_number": "string or null",
+  "_is_return": true,
+  "items": [
+    {
+      "description": "string",
+      "quantity": number,
+      "unit": "string",
+      "unit_price": number,
+      "subtotal": number
+    }
+  ],
+  "total": number or null
+}
 SUPPLIER NAME rules:
 - The supplier is the company SELLING the goods — their name is usually at the top of the invoice in large text.
 - Ignore the buyer name (e.g. "KSENOS FOOD", "SOVA") — that is the restaurant receiving the goods.
+
+RETURN INVOICE rules:
+- "_is_return": true only when the document title is literally "Return Invoice" or "Επιστροφή Τιμολόγιο".
+- total is always POSITIVE (e.g. 12.50, not -12.50) — it represents the credit amount.
+- Extract line items exactly as on a regular invoice.
 
 DATE rules:
 - Use the invoice date (Ημερομηνία / Date), not any delivery or due date.
@@ -546,6 +592,68 @@ def save_delivery(conn, data: dict) -> int | None:
     log.info("Saved delivery %d — %s — €%.2f — %d items", delivery_id, supplier, total, len(items))
     return delivery_id
 
+def save_return(conn, data: dict) -> int | None:
+    """
+    Insert a confirmed return invoice into supplier_returns + return_items.
+    Returns the new return id, or None if duplicate.
+    """
+    supplier   = (data.get("supplier_name") or "Unknown Supplier").strip().title()
+    raw_date   = data.get("invoice_date")
+    total      = data.get("total") or 0.0
+    inv_number = data.get("invoice_number")
+    items      = data.get("items") or []
+
+    try:
+        return_date = datetime.strptime(raw_date, "%Y-%m-%d").date() if raw_date else datetime.today().date()
+        today = datetime.today().date()
+        if (today - return_date).days > 60:
+            corrected = return_date.replace(year=today.year)
+            if abs((today - corrected).days) <= 60:
+                log.warning("Auto-corrected return date year from %s to %s", return_date, corrected)
+                return_date = corrected
+    except ValueError:
+        return_date = datetime.today().date()
+
+    # Duplicate check
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id FROM supplier_returns
+            WHERE LOWER(TRIM(supplier_name)) = LOWER(TRIM(%s))
+              AND return_date = %s
+              AND ABS(amount - %s) < 0.01
+            LIMIT 1
+        """, (supplier, return_date, float(total)))
+        if cur.fetchone():
+            log.info("Duplicate return skipped — %s on %s €%.2f", supplier, return_date, total)
+            return None
+
+    description = f"Return Invoice {inv_number}" if inv_number else "Return Invoice via WhatsApp"
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO supplier_returns
+                (supplier_name, return_date, amount, description, invoice_number, created_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            RETURNING id
+        """, (supplier, return_date, total, description, inv_number))
+        return_id = cur.fetchone()[0]
+
+        for item in items:
+            cur.execute("""
+                INSERT INTO return_items
+                    (return_id, description, quantity, unit_price, subtotal)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                return_id,
+                item.get("description"),
+                item.get("quantity"),
+                item.get("unit_price"),
+                item.get("subtotal"),
+            ))
+
+    conn.commit()
+    log.info("Saved return %d — %s — €%.2f — %d items", return_id, supplier, total, len(items))
+    return return_id
 
 # ── TwiML response helper ──────────────────────────────────────────────────────
 
@@ -596,7 +704,8 @@ def format_summary(data: dict) -> str:
         except ValueError:
             date_warning = f"⚠️ WARNING: Could not parse date '{date_str}'. Please verify."
 
-    lines = ["📦 *Invoice detected:*", ""]
+    is_return = data.get("_is_return", False)
+    lines = ["↩️ *Return Invoice detected:*" if is_return else "📦 *Invoice detected:*", ""]
 
     if date_warning:
         lines.append(date_warning)
@@ -664,7 +773,9 @@ def format_multi_summary(invoices: list[dict], failed: int = 0) -> str:
             except ValueError:
                 pass
 
-        prefix = f"*{i}. {supplier}*" if count > 1 else f"*{supplier}*"
+        is_return = data.get("_is_return", False)
+        return_tag = " ↩️ RETURN" if is_return else ""
+        prefix = f"*{i}. {supplier}{return_tag}*" if count > 1 else f"*{supplier}{return_tag}*"
         try:
             date_display = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d/%m/%Y")
         except ValueError:
@@ -921,7 +1032,7 @@ async def whatsapp_webhook(
                 f"Reply *yes* to save or *no* to discard."
             )
 
-    # ── Confirmed ─────────────────────────────────────────────────────────────
+# ── Confirmed ─────────────────────────────────────────────────────────────
     if body_text in CONFIRM_WORDS:
         saved   = 0
         skipped = 0
@@ -929,23 +1040,26 @@ async def whatsapp_webhook(
 
         for data in invoices:
             try:
-                delivery_id = save_delivery(conn, data)
-
-                if delivery_id is None:
-                    skipped += 1
-                    continue
-
-                items = data.get("items") or []
-                if items:
-                    try:
-                        update_inventory_for_delivery(conn, delivery_id, items)
-                    except Exception as e:
-                        log.error("Inventory update failed for delivery %d: %s", delivery_id, e)
-
-                saved += 1
-
+                if data.get("_is_return"):
+                    result_id = save_return(conn, data)
+                    if result_id is None:
+                        skipped += 1
+                    else:
+                        saved += 1
+                else:
+                    delivery_id = save_delivery(conn, data)
+                    if delivery_id is None:
+                        skipped += 1
+                        continue
+                    items = data.get("items") or []
+                    if items:
+                        try:
+                            update_inventory_for_delivery(conn, delivery_id, items)
+                        except Exception as e:
+                            log.error("Inventory update failed for delivery %d: %s", delivery_id, e)
+                    saved += 1
             except Exception as e:
-                log.error("Failed to save delivery: %s", e)
+                log.error("Failed to save invoice: %s", e)
                 errors += 1
 
         confirm_pending(conn, pending_id)
