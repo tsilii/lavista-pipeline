@@ -1313,17 +1313,19 @@ elif page == "Suppliers":
                         st.error(f"Error: {msg}")
 
                 # Supplier totals footer
-                sup_total = float(sup_del["amount"].sum())
-                sup_paid  = float(sup_del[sup_del["paid"] == True]["amount"].sum())
-                sup_owed  = sup_total - sup_paid - sup_advances_total
+                sup_total    = float(deliveries[deliveries["supplier_name"] == supplier]["amount"].sum())
+                sup_paid     = float(deliveries[(deliveries["supplier_name"] == supplier) & (deliveries["paid"] == True)]["amount"].sum())
+                sup_returned = float(returns[returns["supplier_name"] == supplier]["amount"].sum()) if not returns.empty else 0.0
+                sup_owed     = sup_total - sup_paid - sup_advances_total - sup_returned
                 st.markdown("---")
-                f1, f2, f3, f4 = st.columns([4, 1.5, 1.5, 1.5])
+                f1, f2, f3, f4, f5 = st.columns([3.5, 1.5, 1.5, 1.5, 1.5])
                 f1.markdown(f"**Total ({len(sup_del)} deliveries)**")
                 f2.markdown(f"**€{sup_total:,.2f}**")
                 f3.markdown(f"**Advances: €{sup_advances_total:,.2f}**")
-                f4.markdown(f"**Owed: €{sup_owed:,.2f}**")
+                f4.markdown(f"**Returns: −€{sup_returned:,.2f}**")
+                f5.markdown(f"**Owed: €{sup_owed:,.2f}**")
 
-        # ── Returns ──────────────────────────────────────────────
+                # ── Returns ──────────────────────────────────────────────
                 sup_returns = returns[returns["supplier_name"] == supplier].sort_values("return_date", ascending=False) if not returns.empty else pd.DataFrame()
 
                 if not sup_returns.empty:
