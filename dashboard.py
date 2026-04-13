@@ -332,6 +332,24 @@ def mark_all_paid(supplier_name):
     finally:
         conn.close()
 
+
+@st.cache_data(ttl=30)
+def load_capital_advances():
+    conn = get_conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        return pd.read_sql("""
+            SELECT id, supplier_name, amount, note, advance_date
+            FROM supplier_capital_advances
+            ORDER BY advance_date DESC
+        """, conn)
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+
 def add_capital_advance(supplier_name, amount, note, advance_date):
     conn = get_conn()
     if not conn:
@@ -339,12 +357,27 @@ def add_capital_advance(supplier_name, amount, note, advance_date):
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO supplier_deliveries (supplier_name, delivery_date, amount, description, paid)
-                VALUES (%s, %s, %s, %s, TRUE)
-            """, (supplier_name.strip(), advance_date, amount,
-                  f"💰 Capital Advance — {note.strip()}" if note.strip() else "💰 Capital Advance"))
+                INSERT INTO supplier_capital_advances (supplier_name, amount, note, advance_date)
+                VALUES (%s, %s, %s, %s)
+            """, (supplier_name.strip(), amount, note.strip() or None, advance_date))
         conn.commit()
         return True, f"Capital advance of €{amount:,.2f} recorded for {supplier_name}."
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def delete_capital_advance(advance_id):
+    conn = get_conn()
+    if not conn:
+        return False, "Could not connect to database."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM supplier_capital_advances WHERE id = %s", (advance_id,))
+        conn.commit()
+        return True, "Advance deleted."
     except Exception as e:
         conn.rollback()
         return False, str(e)
@@ -930,7 +963,6 @@ elif page == "Expenses":
                 else:
                     st.error(f"Error: {message}")
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: SUPPLIERS (REDESIGNED — supplier-first, aging buckets, combined audit)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -941,6 +973,7 @@ elif page == "Suppliers":
     st.title("Sova Bistrot — Suppliers")
 
     deliveries = load_supplier_data()
+    advances   = load_capital_advances()
 
     if deliveries is None or deliveries.empty:
         st.info("No deliveries recorded yet. Add your first delivery below or send an invoice photo via WhatsApp.")
@@ -972,11 +1005,16 @@ elif page == "Suppliers":
             sup_all    = deliveries[deliveries["supplier_name"] == supplier]
             sup_unpaid = unpaid[unpaid["supplier_name"] == supplier] if not unpaid.empty else pd.DataFrame()
 
-            total_ordered = float(sup_all["amount"].sum())
-            total_paid    = float(sup_all[sup_all["paid"] == True]["amount"].sum())
-            total_owed    = total_ordered - total_paid
+            total_ordered  = float(sup_all["amount"].sum())
+            total_paid     = float(sup_all[sup_all["paid"] == True]["amount"].sum())
             num_deliveries = len(sup_all)
             last_delivery  = sup_all["delivery_date"].max()
+
+            sup_advances_total = float(advances[
+                advances["supplier_name"].str.lower().str.strip() == supplier.lower().strip()
+            ]["amount"].sum()) if not advances.empty else 0.0
+
+            total_owed = total_ordered - total_paid - sup_advances_total
 
             # Aging buckets
             b_0_30  = float(sup_unpaid[sup_unpaid["aging"] == "0–30"]["amount"].sum())  if not sup_unpaid.empty else 0
@@ -989,6 +1027,7 @@ elif page == "Suppliers":
                 "Deliveries":      num_deliveries,
                 "Total Ordered":   total_ordered,
                 "Total Paid":      total_paid,
+                "Advances":        sup_advances_total,
                 "Outstanding":     total_owed,
                 "0–30 days":       b_0_30,
                 "31–60 days":      b_31_60,
@@ -1008,7 +1047,7 @@ elif page == "Suppliers":
 
         k1, k2, k3 = st.columns(3)
         k1.metric("Total Outstanding (all-time)", f"€{total_outstanding_all:,.2f}",
-                  help="Sum of all unpaid deliveries across all suppliers and all months")
+                  help="Sum of all unpaid deliveries minus capital advances")
         k2.metric("This Month's Spend", f"€{this_month_spend:,.2f}",
                   help="Total deliveries received in the current calendar month")
         k3.metric("Suppliers with Unpaid Balance", f"{suppliers_with_debt}",
@@ -1088,7 +1127,7 @@ elif page == "Suppliers":
 
         # Format for display
         fmt_df = display_df.copy()
-        for col in ["Total Ordered", "Total Paid", "Outstanding", "0–30 days", "31–60 days", "61–90 days", "90+ days"]:
+        for col in ["Total Ordered", "Total Paid", "Advances", "Outstanding", "0–30 days", "31–60 days", "61–90 days", "90+ days"]:
             fmt_df[col] = fmt_df[col].apply(lambda x: f"€{x:,.2f}" if x > 0 else "—")
         fmt_df["Last Delivery"] = fmt_df["Last Delivery"].astype(str)
 
@@ -1108,7 +1147,7 @@ elif page == "Suppliers":
             sup_del  = deliveries[deliveries["supplier_name"] == supplier].sort_values("delivery_date", ascending=False)
             owed     = sup_row["Outstanding"]
 
-            status_icon = "🟢" if owed == 0 else ("🔴" if sup_row["90+ days"] > 0 else ("🟠" if sup_row["61–90 days"] > 0 else ("🟡" if sup_row["31–60 days"] > 0 else "🟢")))
+            status_icon = "🟢" if owed <= 0 else ("🔴" if sup_row["90+ days"] > 0 else ("🟠" if sup_row["61–90 days"] > 0 else ("🟡" if sup_row["31–60 days"] > 0 else "🟢")))
 
             exp_key     = f"supplier_exp_{supplier}"
             is_expanded = st.session_state.supplier_expander_state.get(exp_key, False)
@@ -1156,7 +1195,6 @@ elif page == "Suppliers":
                 for _, row in sup_del.iterrows():
                     c1, c2, c3, c4, c5 = st.columns([1.5, 3, 1.5, 1.2, 0.5])
 
-                    # Show aging indicator for unpaid
                     date_str = str(row["delivery_date"])
                     if not row["paid"]:
                         days_old = (today - row["delivery_date"]).days
@@ -1188,34 +1226,60 @@ elif page == "Suppliers":
                         else:
                             st.error(message)
 
-                # ── Capital Advance ───────────────────────────────────────────
+                # ── Capital Advances ──────────────────────────────────────────
+                sup_advances_df = advances[
+                    advances["supplier_name"].str.lower().str.strip() == supplier.lower().strip()
+                ] if not advances.empty else pd.DataFrame()
+                sup_advances_total = float(sup_advances_df["amount"].sum()) if not sup_advances_df.empty else 0.0
+
                 st.markdown("---")
-                with st.expander(f"💰 Give Capital Advance to {supplier}"):
-                    with st.form(key=f"advance_form_{supplier}"):
-                        adv_col1, adv_col2, adv_col3 = st.columns([2, 3, 2])
-                        adv_amount = adv_col1.number_input("Amount (€)", min_value=1.0, step=50.0, value=500.0)
-                        adv_note   = adv_col2.text_input("Note (optional)", placeholder="e.g. Pre-payment for next order")
-                        adv_date   = adv_col3.date_input("Date", value=date.today())
-                        adv_submit = st.form_submit_button("Record Advance", use_container_width=True)
-                    if adv_submit:
-                        ok, msg = add_capital_advance(supplier, adv_amount, adv_note, adv_date)
-                        if ok:
-                            st.success(msg)
-                            st.session_state.supplier_expander_state[exp_key] = True
-                            st.cache_data.clear()
-                            st.rerun()
-                        else:
-                            st.error(f"Error: {msg}")
+                st.markdown("**💰 Capital Advances**")
+
+                if not sup_advances_df.empty:
+                    for _, adv in sup_advances_df.iterrows():
+                        a1, a2, a3, a4 = st.columns([2, 3, 2, 0.5])
+                        a1.write(str(adv["advance_date"]))
+                        a2.write(adv["note"] or "—")
+                        a3.write(f"€{float(adv['amount']):,.2f}")
+                        if a4.button("🗑", key=f"del_adv_{adv['id']}"):
+                            ok, msg = delete_capital_advance(int(adv["id"]))
+                            if ok:
+                                st.success(msg)
+                                st.session_state.supplier_expander_state[exp_key] = True
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                else:
+                    st.caption("No advances recorded yet.")
+
+                with st.form(key=f"advance_form_{supplier}"):
+                    fa1, fa2, fa3 = st.columns([2, 3, 2])
+                    adv_amount = fa1.number_input("Amount (€)", min_value=1.0, step=50.0, value=500.0)
+                    adv_note   = fa2.text_input("Note (optional)", placeholder="e.g. Pre-payment for next order")
+                    adv_date   = fa3.date_input("Date", value=date.today())
+                    adv_submit = st.form_submit_button("💰 Record Advance", use_container_width=True)
+
+                if adv_submit:
+                    ok, msg = add_capital_advance(supplier, adv_amount, adv_note, adv_date)
+                    if ok:
+                        st.success(msg)
+                        st.session_state.supplier_expander_state[exp_key] = True
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error(f"Error: {msg}")
 
                 # Supplier totals footer
                 sup_total = float(sup_del["amount"].sum())
                 sup_paid  = float(sup_del[sup_del["paid"] == True]["amount"].sum())
-                sup_owed  = sup_total - sup_paid
+                sup_owed  = sup_total - sup_paid - sup_advances_total
                 st.markdown("---")
-                f1, f2, f3 = st.columns([4.5, 1.5, 1.2])
+                f1, f2, f3, f4 = st.columns([4, 1.5, 1.5, 1.5])
                 f1.markdown(f"**Total ({len(sup_del)} deliveries)**")
                 f2.markdown(f"**€{sup_total:,.2f}**")
-                f3.markdown(f"**Owed: €{sup_owed:,.2f}**")
+                f3.markdown(f"**Advances: €{sup_advances_total:,.2f}**")
+                f4.markdown(f"**Owed: €{sup_owed:,.2f}**")
 
         # ── Historical Pivot Table ────────────────────────────────────────────
         st.divider()
@@ -1378,8 +1442,6 @@ elif page == "Suppliers":
                 st.rerun()
             else:
                 st.error(f"Error: {message}")
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE: INVENTORY
 # ══════════════════════════════════════════════════════════════════════════════
