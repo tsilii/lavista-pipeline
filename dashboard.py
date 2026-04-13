@@ -332,6 +332,25 @@ def mark_all_paid(supplier_name):
     finally:
         conn.close()
 
+def add_capital_advance(supplier_name, amount, note, advance_date):
+    conn = get_conn()
+    if not conn:
+        return False, "Could not connect to database."
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO supplier_deliveries (supplier_name, delivery_date, amount, description, paid)
+                VALUES (%s, %s, %s, %s, TRUE)
+            """, (supplier_name.strip(), advance_date, amount,
+                  f"💰 Capital Advance — {note.strip()}" if note.strip() else "💰 Capital Advance"))
+        conn.commit()
+        return True, f"Capital advance of €{amount:,.2f} recorded for {supplier_name}."
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
+
 
 # ── Navigation ─────────────────────────────────────────────────────────────────
 
@@ -1168,6 +1187,25 @@ elif page == "Suppliers":
                             st.rerun()
                         else:
                             st.error(message)
+
+                # ── Capital Advance ───────────────────────────────────────────
+                st.markdown("---")
+                with st.expander(f"💰 Give Capital Advance to {supplier}"):
+                    with st.form(key=f"advance_form_{supplier}"):
+                        adv_col1, adv_col2, adv_col3 = st.columns([2, 3, 2])
+                        adv_amount = adv_col1.number_input("Amount (€)", min_value=1.0, step=50.0, value=500.0)
+                        adv_note   = adv_col2.text_input("Note (optional)", placeholder="e.g. Pre-payment for next order")
+                        adv_date   = adv_col3.date_input("Date", value=date.today())
+                        adv_submit = st.form_submit_button("Record Advance", use_container_width=True)
+                    if adv_submit:
+                        ok, msg = add_capital_advance(supplier, adv_amount, adv_note, adv_date)
+                        if ok:
+                            st.success(msg)
+                            st.session_state.supplier_expander_state[exp_key] = True
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Error: {msg}")
 
                 # Supplier totals footer
                 sup_total = float(sup_del["amount"].sum())
