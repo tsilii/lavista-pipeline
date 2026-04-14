@@ -10,3 +10,4 @@ plotly>=5.20.0
 anthropic>=0.25.0
 python-multipart>=0.0.9
 twilio>=8.0.0
+Pillow

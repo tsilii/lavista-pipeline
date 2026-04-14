@@ -137,6 +137,7 @@ First check: is this document a supplier invoice or delivery note with products 
 - YES → extract the data as instructed below
 - A document IS an invoice if it contains: a list of products/items, quantities, prices, and a total amount.
 - A document titled "Return Invoice" or "Επιστροφή Τιμολόγιο" → extract it AND set "_is_return": true.
+- A document titled "ΔΕΛΤΙΟ ΕΠΙΣΤΡΟΦΗΣ" or "ΔΕΛΤΙΟ ΕΠΙΣΤΡΟΦΗΣ ΜΗ ΕΜΠΟΡΕΥΣΙΜΩΝ" (non-merchandise return slip) → extract it AND set "_is_return": true.
 - "Credit Invoice", "AR Invoice", "Sales Invoice", "Tax Invoice", "Delivery Note" are ALL regular invoices — set "_is_return": false.
 - A statement of account, bank statement, or aged balance → return {"_not_invoice": true, "document_type": "describe what it is in one sentence"}
 
@@ -179,10 +180,17 @@ For return invoices:
 }
 SUPPLIER NAME rules:
 - The supplier is the company SELLING the goods — their name is usually at the top of the invoice in large text.
-- Ignore the buyer name (e.g. "KSENOS FOOD", "SOVA") — that is the restaurant receiving the goods.
+- Ignore the buyer name (e.g. "KSENOS FOOD", "SOVA", "KSENOS FOOD BEVERAGE LTD") — that is the restaurant receiving the goods.
+- If the supplier name is NOT visible at the top, check the ENTIRE document including:
+  - Legal text or fine print at the bottom of the page
+  - Footer disclaimers (e.g. "η εταιρεία ... Ltd δεν φέρει ευθύνη")
+  - Company stamps or signatures
+  - Any mention of the issuing company name anywhere on the page
+- If this is page 2+ of an invoice (no header but has totals/items), still look for the supplier name in the fine print.
 
 RETURN INVOICE rules:
-- "_is_return": true only when the document title is literally "Return Invoice" or "Επιστροφή Τιμολόγιο".
+- "_is_return": true when the document title is "Return Invoice", "Επιστροφή Τιμολόγιο", "ΔΕΛΤΙΟ ΕΠΙΣΤΡΟΦΗΣ", or "ΔΕΛΤΙΟ ΕΠΙΣΤΡΟΦΗΣ ΜΗ ΕΜΠΟΡΕΥΣΙΜΩΝ".
+- For non-merchandise returns (ΔΕΛΤΙΟ ΕΠΙΣΤΡΟΦΗΣ ΜΗ ΕΜΠΟΡΕΥΣΙΜΩΝ), extract the items listed even if they have no prices — use 0.00 for missing prices.
 - total is always POSITIVE (e.g. 12.50, not -12.50) — it represents the credit amount.
 - Extract line items exactly as on a regular invoice.
 
