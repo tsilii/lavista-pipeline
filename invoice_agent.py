@@ -159,6 +159,28 @@ def ensure_tables(conn):
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS supplier_returns (
+                id              SERIAL PRIMARY KEY,
+                supplier_name   TEXT           NOT NULL,
+                return_date     DATE           NOT NULL,
+                amount          NUMERIC(10,2)  NOT NULL,
+                description     TEXT,
+                invoice_number  TEXT,
+                created_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW()
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS return_items (
+                id          SERIAL PRIMARY KEY,
+                return_id   INTEGER        NOT NULL
+                    REFERENCES supplier_returns(id) ON DELETE CASCADE,
+                description TEXT,
+                quantity    NUMERIC(10,3),
+                unit_price  NUMERIC(10,2),
+                subtotal    NUMERIC(10,2)
+            );
+        """)
     conn.commit()
 
 
@@ -171,10 +193,9 @@ Invoices may come from different suppliers with different layouts, in English or
 First check: is this document a supplier invoice or delivery note with products and a total amount?
 - YES → extract the data as instructed below
 - A document IS an invoice if it contains: a list of products/items, quantities, prices, and a total amount.
-- "Credit Invoice", "AR Invoice", "Sales Invoice", "Tax Invoice", "Delivery Note" are ALL valid invoices — extract them.
-- A "Credit Note" or "Credit Memo" that CANCELS a previous invoice and shows NEGATIVE amounts or items returned is NOT an invoice.
-- NO (it is a statement of account, bank statement, aged balance, or credit note cancelling a previous invoice) →
-  return exactly this JSON: {"_not_invoice": true, "document_type": "describe what it is in one sentence"}
+- A document titled "Return Invoice" or "Επιστροφή Τιμολόγιο" → extract it AND set "_is_return": true.
+- "Credit Invoice", "AR Invoice", "Sales Invoice", "Tax Invoice", "Delivery Note" are ALL regular invoices — set "_is_return": false.
+- A statement of account, bank statement, or aged balance → return {"_not_invoice": true, "document_type": "describe what it is in one sentence"}
 
 If it IS an invoice, extract the following and return ONLY valid JSON. No explanation, no markdown, no backticks.
 
@@ -183,6 +204,25 @@ Required JSON format:
   "supplier_name": "string or null",
   "invoice_date": "YYYY-MM-DD or null",
   "invoice_number": "string or null",
+  "_is_return": false,
+  "items": [
+    {
+      "description": "string",
+      "quantity": number,
+      "unit": "string",
+      "unit_price": number,
+      "subtotal": number
+    }
+  ],
+  "total": number or null
+}
+
+For return invoices:
+{
+  "supplier_name": "string or null",
+  "invoice_date": "YYYY-MM-DD or null",
+  "invoice_number": "string or null",
+  "_is_return": true,
   "items": [
     {
       "description": "string",
@@ -198,6 +238,11 @@ Required JSON format:
 SUPPLIER NAME rules:
 - The supplier is the company SELLING the goods — their name is usually at the top of the invoice in large text.
 - Ignore the buyer name (e.g. "KSENOS FOOD", "SOVA") — that is the restaurant receiving the goods.
+
+RETURN INVOICE rules:
+- "_is_return": true only when the document title is literally "Return Invoice" or "Επιστροφή Τιμολόγιο".
+- total is always POSITIVE (e.g. 12.50, not -12.50) — it represents the credit amount.
+- Extract line items exactly as on a regular invoice.
 
 DATE rules:
 - Use the invoice date (Ημερομηνία / Date), not any delivery or due date.
@@ -226,18 +271,37 @@ LINE ITEM rules:
     ml / milliliter → "ml"
     γρ / gr / gram / γραμμάρια → "gr"
     If no unit column exists or unit is unclear, use "pcs" as default.
-- description: product name always in proper Greek.
+    If the quantity column contains a combined value like "2kg", "500gr", "1.5L",
+    split them: quantity = the number, unit = the unit suffix (normalized).
+    If the description contains a size like "500GR" or "80GR" or "1L",
+    this is the pack size — keep the U/M column unit for tracking (e.g. pcs).
+- description: product name always in proper Greek. Rules:
+    * Use the correct standard Greek word — NOT a phonetic transliteration of the English.
+      Examples: RASBERRIES → Σμέουρα, TOMATOES → Ντομάτες, POTATOES → Πατάτες,
+      MUSHROOMS → Μανιτάρια, ASPARAGUS → Σπαράγγια, DILL → Άνηθος,
+      OREGANO/RIGANI → Ρίγανη, THYME/THYMARI → Θυμάρι, SPRING ONIONS → Κρεμμυδάκια,
+      BANANAS → Μπανάνες, ORANGES → Πορτοκάλια, LEMONS → Λεμόνια,
+      STRAWBERRIES → Φράουλες, BLUEBERRIES → Βατόμουρα, WATERMELON → Καρπούζι,
+      MILK → Γάλα, CHEESE → Τυρί, YOGURT → Γιαούρτι.
+    * If you do not know the Greek word with certainty, keep the original English name.
+    * Do NOT transliterate English sounds into Greek letters.
+    * Keep size suffixes as-is (e.g. "500GR", "125GR", "1L") in the original format.
+    * Always use Title Case (first letter capital, rest lowercase).
 - quantity: the QTY or Ποσότητα column value.
 - unit_price: the Price or Τιμή column value.
 - subtotal: use the Net or Σύνολο or Αξία column — this is the final line value after any discount.
-- SKIP items where subtotal is 0.00.
+- SKIP items where subtotal is 0.00 — these are free packaging or empty rows.
 - If no unit price is visible, calculate it as subtotal / quantity.
-- All numbers must be plain numbers — no currency symbols, no commas as thousands separators.
+- All numbers must be plain numbers — no currency symbols, no currency codes (EUR, USD etc.), no commas as thousands separators.
+  Examples: "EUR 11.00" → 11.00, "€44.00" → 44.00, "1,250.00" → 1250.00
 
 READABILITY rules:
 - The image may be a photo taken at an angle, with shadows, or partially blurred.
-  Do your best to read all visible text.
-- Read the entire document carefully before extracting.
+  Do your best to read all visible text — do not give up on a document just because
+  some parts are hard to read.
+- If a number is partially obscured, make your best reasonable estimate based on context
+  and mark it with a note in the description if needed.
+- Read the entire document carefully before extracting — don't stop at the first section.
 
 GENERAL rules:
 - If a field is genuinely not visible or unclear, use null.
@@ -321,9 +385,11 @@ UNIT_MAP = {
     "κιλ": "kg", "κιλά": "kg", "kilo": "kg", "kg": "kg",
     "gr": "gr", "γρ": "gr", "gram": "gr", "grams": "gr",
     "γραμμάρια": "gr", "γραμμάριο": "gr",
+    "500gr": "gr", "250gr": "gr", "100gr": "gr", "80gr": "gr",
     "λίτρο": "L", "λίτρα": "L", "liter": "L", "litre": "L",
     "l": "L", "lt": "L", "λτ": "L",
     "ml": "ml", "milliliter": "ml", "millilitre": "ml",
+    "1l": "L", "2l": "L", "5l": "L",
     "τεμ": "pcs", "τεμάχιο": "pcs", "τεμάχια": "pcs",
     "pcs": "pcs", "pieces": "pcs", "each": "pcs", "piece": "pcs",
     "τμχ": "pcs", "τχ": "pcs",
@@ -389,6 +455,66 @@ def save_delivery(conn, data: dict) -> tuple[int | None, str]:
             ))
     conn.commit()
     return delivery_id, f"Saved — {supplier} — €{total:.2f} — {len(items)} items"
+
+
+def save_return(conn, data: dict) -> tuple[int | None, str]:
+    """
+    Insert a confirmed return invoice into supplier_returns + return_items.
+    Returns (return_id, status_message) — return_id is None if skipped as duplicate.
+    """
+    supplier   = (data.get("supplier_name") or "Unknown Supplier").strip().title()
+    raw_date   = data.get("invoice_date")
+    total      = float(data.get("total") or 0.0)
+    inv_number = data.get("invoice_number")
+    items      = data.get("items") or []
+
+    try:
+        return_date = datetime.strptime(raw_date, "%Y-%m-%d").date() if raw_date else date.today()
+        today = date.today()
+        if (today - return_date).days > 60:
+            corrected = return_date.replace(year=today.year)
+            if abs((today - corrected).days) <= 60:
+                return_date = corrected
+    except ValueError:
+        return_date = date.today()
+
+    # Duplicate check against supplier_returns
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id FROM supplier_returns
+            WHERE LOWER(TRIM(supplier_name)) = LOWER(TRIM(%s))
+              AND return_date = %s
+              AND ABS(amount - %s) < 0.01
+            LIMIT 1
+        """, (supplier, return_date, total))
+        if cur.fetchone():
+            return None, f"Duplicate return — {supplier} on {return_date} €{total:.2f}"
+
+    description = f"Return Invoice {inv_number}" if inv_number else "Return Invoice via Agent"
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO supplier_returns
+                (supplier_name, return_date, amount, description, invoice_number, created_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            RETURNING id
+        """, (supplier, return_date, total, description, inv_number))
+        return_id = cur.fetchone()[0]
+
+        for item in items:
+            cur.execute("""
+                INSERT INTO return_items
+                    (return_id, description, quantity, unit_price, subtotal)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                return_id,
+                item.get("description"),
+                item.get("quantity"),
+                item.get("unit_price"),
+                item.get("subtotal"),
+            ))
+    conn.commit()
+    return return_id, f"Return saved — {supplier} — €{total:.2f} — {len(items)} items"
 
 
 def update_inventory(conn, delivery_id: int, items: list[dict]) -> None:
@@ -614,7 +740,7 @@ if st.session_state.extraction_results is not None and not st.session_state.conf
             "Invoice #": inv.get("invoice_number") or "—",
             "Items":    len(inv.get("items") or []),
             "Total":    f"€{float(inv.get('total') or 0):,.2f}",
-            "Status":   "⚠️ Duplicate" if inv.get("_is_duplicate") else "✅ New",
+            "Status":   "⚠️ Duplicate" if inv.get("_is_duplicate") else ("↩️ Return" if inv.get("_is_return") else "✅ New"),
         })
 
     df = pd.DataFrame(table_rows)
@@ -678,17 +804,24 @@ if st.session_state.extraction_results is not None and not st.session_state.conf
 
                 for idx, inv in enumerate(new_invoices):
                     try:
-                        delivery_id, msg = save_delivery(conn, inv)
-                        if delivery_id:
-                            items = inv.get("items") or []
-                            if items:
-                                try:
-                                    update_inventory(conn, delivery_id, items)
-                                except Exception as e:
-                                    log.error("Inventory update failed for delivery %d: %s", delivery_id, e)
-                            saved += 1
+                        if inv.get("_is_return"):
+                            result_id, msg = save_return(conn, inv)
+                            if result_id:
+                                saved += 1
+                            else:
+                                skipped_count += 1
                         else:
-                            skipped_count += 1
+                            delivery_id, msg = save_delivery(conn, inv)
+                            if delivery_id:
+                                items = inv.get("items") or []
+                                if items:
+                                    try:
+                                        update_inventory(conn, delivery_id, items)
+                                    except Exception as e:
+                                        log.error("Inventory update failed for delivery %d: %s", delivery_id, e)
+                                saved += 1
+                            else:
+                                skipped_count += 1
                     except Exception as e:
                         log.error("Save failed: %s", e)
                         err_count += 1
